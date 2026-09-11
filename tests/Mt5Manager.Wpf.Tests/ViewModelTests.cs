@@ -48,6 +48,15 @@ public sealed class ViewModelTests
         vm.ResultText.Should().Contain("Completed");
     }
 
+    [Fact] public async Task Continue_availability_notifies_and_disables_during_and_after_execution()
+    {
+        var terminal=T(); var cleaner=new BlockingCleaner(); var vm=new CleanupViewModel(terminal,new Inspector(),CoordinatorFor(terminal,false,cleaner)); vm.Categories[0].IsSelected=true; vm.IsDestructiveConfirmed=true;
+        var changes=new List<string?>(); vm.PropertyChanged+=(_,e)=>changes.Add(e.PropertyName); await vm.PrepareAsync();
+        vm.CanContinue.Should().BeTrue(); changes.Clear(); var continuing=vm.ContinueAsync(false); await cleaner.Started.Task;
+        vm.CanContinue.Should().BeFalse(); changes.Should().Contain(nameof(vm.CanContinue)); cleaner.Release.SetResult(); await continuing;
+        vm.CanContinue.Should().BeFalse();
+    }
+
     [Fact] public async Task Failed_stop_refreshes_actual_state_and_restart_does_not_start()
     {
         var process=new Process{State=new(TerminalState.Running,7,null),StopOutcome=StopOutcome.Failed}; var row=new TerminalRowViewModel(T(),process);
@@ -76,6 +85,7 @@ public sealed class ViewModelTests
     sealed class Process:ITerminalProcessController { public TerminalRuntimeState State=new(TerminalState.Running,1,null); public bool ThrowStart; public bool Timeout; public StopOutcome? StopOutcome; public int StartCalls; public Task<TerminalRuntimeState> GetStateAsync(TerminalRegistration t,CancellationToken c)=>Task.FromResult(State); public Task<int> StartAsync(TerminalRegistration t,CancellationToken c){StartCalls++;if(ThrowStart)throw new InvalidOperationException("boom");State=new(TerminalState.Running,1,null);return Task.FromResult(1);} public Task<StopResult> StopAsync(TerminalRegistration t,TimeSpan x,bool force,CancellationToken c){var outcome=force?Mt5Manager.Application.Abstractions.StopOutcome.ForceTerminated:StopOutcome??(Timeout?Mt5Manager.Application.Abstractions.StopOutcome.TimedOut:Mt5Manager.Application.Abstractions.StopOutcome.ExitedGracefully);return Task.FromResult(new StopResult(outcome,outcome==Mt5Manager.Application.Abstractions.StopOutcome.Failed?"stop failed":null));} }
     sealed class Inspector:ITerminalStorageInspector { public Task<IReadOnlyList<CategoryUsage>> InspectAsync(TerminalRegistration t,CancellationToken c)=>Task.FromResult<IReadOnlyList<CategoryUsage>>([new(CleanupCategory.Logs,12,1200)]); }
     sealed class Cleaner:ITerminalCleanupService { public Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(TerminalRegistration t,IReadOnlySet<CleanupCategory> c,CancellationToken x)=>Task.FromResult<IReadOnlyList<CleanupCategoryResult>>([new(CleanupCategory.Logs,11,1100,[new("locked","denied")])]); }
+    sealed class BlockingCleaner:ITerminalCleanupService { public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously); public async Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(TerminalRegistration t,IReadOnlySet<CleanupCategory> c,CancellationToken x){Started.SetResult();await Release.Task;return [];} }
     sealed class Audit:IAuditLogger { public Task AppendAsync(AuditRecord r,CancellationToken c=default)=>Task.CompletedTask; }
-    static TerminalOperationCoordinator CoordinatorFor(TerminalRegistration t,bool timeout=true){var r=new Registry{Items=[t]};return new(r,new Process{Timeout=timeout},new Cleaner(),new Audit());}
+    static TerminalOperationCoordinator CoordinatorFor(TerminalRegistration t,bool timeout=true,ITerminalCleanupService? cleaner=null){var r=new Registry{Items=[t]};return new(r,new Process{Timeout=timeout},cleaner??new Cleaner(),new Audit());}
 }
