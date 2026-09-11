@@ -33,6 +33,20 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Start_preserves_root_working_directory()
+    {
+        var rootDirectory = Path.GetPathRoot(FixturePath)!;
+        var output = Path.Combine(_root, "root-launch.json");
+        var terminal = Registration(rootDirectory, output, "ignore");
+
+        var pid = await _controller.StartAsync(terminal, CancellationToken.None);
+        Track(pid);
+        var launch = await ReadLaunchAsync(output);
+
+        launch.WorkingDirectory.Should().Be(rootDirectory);
+    }
+
+    [Fact]
     public async Task Stop_returns_graceful_exit_when_process_accepts_close()
     {
         var terminal = Registration(_root, Path.Combine(_root, "graceful.json"), "exit");

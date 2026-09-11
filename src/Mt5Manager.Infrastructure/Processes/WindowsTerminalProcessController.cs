@@ -8,66 +8,74 @@ namespace Mt5Manager.Infrastructure.Processes;
 public sealed class WindowsTerminalProcessController : ITerminalProcessController
 {
     private readonly ConcurrentDictionary<Guid, TrackedProcess> _processes = new();
+    private readonly SemaphoreSlim _gate = new(1, 1);
 
-    public Task<TerminalRuntimeState> GetStateAsync(TerminalRegistration terminal, CancellationToken cancellationToken)
+    public async Task<TerminalRuntimeState> GetStateAsync(TerminalRegistration terminal, CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
+        await _gate.WaitAsync(cancellationToken);
         try
         {
             var process = FindRunningProcess(terminal);
-            return Task.FromResult(process is null
+            return process is null
                 ? new TerminalRuntimeState(TerminalState.Stopped, null, null)
-                : new TerminalRuntimeState(TerminalState.Running, process.Id, null));
+                : new TerminalRuntimeState(TerminalState.Running, process.Id, null);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            return Task.FromResult(new TerminalRuntimeState(TerminalState.Error, null, exception.Message));
+            return new TerminalRuntimeState(TerminalState.Error, null, exception.Message);
         }
+        finally { _gate.Release(); }
     }
 
-    public Task<int> StartAsync(TerminalRegistration terminal, CancellationToken cancellationToken)
+    public async Task<int> StartAsync(TerminalRegistration terminal, CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        if (FindRunningProcess(terminal) is not null)
-            throw new InvalidOperationException($"Terminal '{terminal.DisplayName}' is already running.");
-
-        var startInfo = new ProcessStartInfo
+        await _gate.WaitAsync(cancellationToken);
+        try
         {
-            FileName = CanonicalPath(terminal.ExecutablePath),
-            WorkingDirectory = CanonicalPath(terminal.WorkingDirectory),
-            UseShellExecute = false
-        };
-        foreach (var argument in terminal.Arguments) startInfo.ArgumentList.Add(argument);
+            if (FindRunningProcess(terminal) is not null)
+                throw new InvalidOperationException($"Terminal '{terminal.DisplayName}' is already running.");
 
-        var process = Process.Start(startInfo) ?? throw new InvalidOperationException("The terminal process could not be started.");
-        var tracked = new TrackedProcess(process, CanonicalPath(terminal.ExecutablePath));
-        if (!_processes.TryAdd(terminal.Id, tracked))
-        {
-            process.Kill(entireProcessTree: true);
-            process.Dispose();
-            throw new InvalidOperationException($"Terminal '{terminal.DisplayName}' is already running.");
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = CanonicalPath(terminal.ExecutablePath),
+                WorkingDirectory = CanonicalPath(terminal.WorkingDirectory),
+                UseShellExecute = false
+            };
+            foreach (var argument in terminal.Arguments) startInfo.ArgumentList.Add(argument);
+
+            var process = Process.Start(startInfo) ?? throw new InvalidOperationException("The terminal process could not be started.");
+            var tracked = new TrackedProcess(process, CanonicalPath(terminal.ExecutablePath));
+            if (!_processes.TryAdd(terminal.Id, tracked))
+            {
+                process.Kill(entireProcessTree: true);
+                process.Dispose();
+                throw new InvalidOperationException($"Terminal '{terminal.DisplayName}' is already running.");
+            }
+            return process.Id;
         }
-        process.EnableRaisingEvents = true;
-        process.Exited += (_, _) => Remove(terminal.Id, tracked);
-        return Task.FromResult(process.Id);
+        finally { _gate.Release(); }
     }
 
     public async Task<StopResult> StopAsync(TerminalRegistration terminal, TimeSpan timeout, bool force, CancellationToken cancellationToken)
     {
-        Process? process;
+        await _gate.WaitAsync(cancellationToken);
         try
         {
-            process = FindRunningProcess(terminal);
+            var process = FindRunningProcess(terminal);
             if (process is null) return new StopResult(StopOutcome.AlreadyStopped, null);
 
             process.CloseMainWindow();
             if (await WaitForExitAsync(process, timeout, cancellationToken))
+            {
+                Remove(terminal.Id, _processes[terminal.Id]);
                 return new StopResult(StopOutcome.ExitedGracefully, null);
+            }
 
             if (!force) return new StopResult(StopOutcome.TimedOut, null);
 
             process.Kill(entireProcessTree: true);
             await process.WaitForExitAsync(cancellationToken);
+            Remove(terminal.Id, _processes[terminal.Id]);
             return new StopResult(StopOutcome.ForceTerminated, null);
         }
         catch (OperationCanceledException) { throw; }
@@ -75,6 +83,7 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
         {
             return new StopResult(StopOutcome.Failed, exception.Message);
         }
+        finally { _gate.Release(); }
     }
 
     private Process? FindRunningProcess(TerminalRegistration terminal)
@@ -119,10 +128,13 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
         }
     }
 
-    private void Remove(Guid registrationId, TrackedProcess tracked) =>
-        _processes.TryRemove(new KeyValuePair<Guid, TrackedProcess>(registrationId, tracked));
+    private void Remove(Guid registrationId, TrackedProcess tracked)
+    {
+        if (_processes.TryRemove(new KeyValuePair<Guid, TrackedProcess>(registrationId, tracked)))
+            tracked.Process.Dispose();
+    }
 
-    private static string CanonicalPath(string path) => Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    private static string CanonicalPath(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
 
     private sealed record TrackedProcess(Process Process, string ExecutablePath);
 }
