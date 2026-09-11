@@ -28,6 +28,24 @@ public sealed class ViewModelTests
         vm.Terminals.Should().ContainSingle(x=>x.DisplayName=="Gamma");
     }
 
+    [Fact] public async Task Main_selection_survives_refresh_and_tracks_filtered_results()
+    {
+        var alpha=T("Alpha"); var beta=T("Beta");
+        var discovery=new Discovery([alpha,beta]); var vm=new MainViewModel(discovery,new Registry(),new Process());
+        await vm.RefreshAsync();
+        vm.SelectedTerminal!.Terminal.Id.Should().Be(alpha.Id);
+
+        vm.SelectedTerminal=vm.Terminals.Single(x=>x.Terminal.Id==beta.Id);
+        discovery.Items=[alpha,beta]; await vm.RefreshAsync();
+        vm.SelectedTerminal!.Terminal.Id.Should().Be(beta.Id);
+
+        vm.SearchText="alp";
+        vm.SelectedTerminal!.Terminal.Id.Should().Be(alpha.Id);
+
+        vm.SearchText="missing";
+        vm.SelectedTerminal.Should().BeNull();
+    }
+
     [Fact] public async Task Row_commands_recover_after_exception_and_track_state()
     {
         var process=new Process { State=new(TerminalState.Stopped,null,null), ThrowStart=true }; var row=new TerminalRowViewModel(T(),process);
