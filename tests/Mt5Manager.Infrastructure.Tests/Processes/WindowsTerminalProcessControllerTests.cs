@@ -11,6 +11,7 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
 {
     private readonly WindowsTerminalProcessController _controller = new();
     private readonly List<Process> _spawned = [];
+    private readonly HashSet<int> _spawnedIds = [];
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"mt5-process-{Guid.NewGuid():N}");
     private string FixturePath => Path.Combine(FindRepositoryRoot(), "tests", "Fixtures", "ExitOnClose", "bin", "Debug", "net8.0-windows", "ExitOnClose.exe");
 
@@ -21,8 +22,7 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
         var output = Path.Combine(_root, "launch.json");
         var terminal = Registration(workingDirectory, output, "ignore", "argument with spaces", "quoted\"value");
 
-        var pid = await _controller.StartAsync(terminal, CancellationToken.None);
-        Track(pid);
+        var pid = Track(await _controller.StartAsync(terminal, CancellationToken.None));
         var launch = await ReadLaunchAsync(output);
         var state = await _controller.GetStateAsync(terminal, CancellationToken.None);
 
@@ -39,8 +39,7 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
         var output = Path.Combine(_root, "root-launch.json");
         var terminal = Registration(rootDirectory, output, "ignore");
 
-        var pid = await _controller.StartAsync(terminal, CancellationToken.None);
-        Track(pid);
+        Track(await _controller.StartAsync(terminal, CancellationToken.None));
         var launch = await ReadLaunchAsync(output);
 
         launch.WorkingDirectory.Should().Be(rootDirectory);
@@ -50,39 +49,33 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
     public async Task Natural_exit_releases_tracked_process_without_another_controller_call()
     {
         var terminal = Registration(_root, Path.Combine(_root, "natural-exit.json"), "self-exit");
-        var pid = await _controller.StartAsync(terminal, CancellationToken.None);
-        Track(pid);
+        var pid = Track(await _controller.StartAsync(terminal, CancellationToken.None));
 
-        await _spawned[^1].WaitForExitAsync();
+        await WaitUntilAsync(() => TrackedProcessCount() == 0);
 
-        var processesField = typeof(WindowsTerminalProcessController).GetField("_processes", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-        var processes = (System.Collections.IDictionary)processesField.GetValue(_controller)!;
-        await WaitUntilAsync(() => processes.Count == 0);
-        processes.Count.Should().Be(0);
+        TrackedProcessCount().Should().Be(0);
+        Process.GetProcesses().Any(candidate => candidate.Id == pid).Should().BeFalse();
     }
 
     [Fact]
     public async Task Immediate_exit_releases_tracked_process()
     {
-        for (var attempt = 0; attempt < 200; attempt++)
+        for (var attempt = 0; attempt < 50; attempt++)
         {
             var terminal = Registration(_root, Path.Combine(_root, $"immediate-{attempt}.json"), "exit-now");
-            var pid = await _controller.StartAsync(terminal, CancellationToken.None);
-            try { Track(pid); } catch (ArgumentException) { }
+            Track(await _controller.StartAsync(terminal, CancellationToken.None));
+
+            await WaitUntilAsync(() => TrackedProcessCount() == 0);
         }
 
-        var processesField = typeof(WindowsTerminalProcessController).GetField("_processes", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-        var processes = (System.Collections.IDictionary)processesField.GetValue(_controller)!;
-        await WaitUntilAsync(() => processes.Count == 0);
-        processes.Count.Should().Be(0);
+        TrackedProcessCount().Should().Be(0);
     }
 
     [Fact]
     public async Task Stop_returns_graceful_exit_when_process_accepts_close()
     {
         var terminal = Registration(_root, Path.Combine(_root, "graceful.json"), "exit");
-        var pid = await _controller.StartAsync(terminal, CancellationToken.None);
-        Track(pid);
+        var pid = Track(await _controller.StartAsync(terminal, CancellationToken.None));
         await WaitForMainWindowAsync(pid);
 
         var result = await _controller.StopAsync(terminal, TimeSpan.FromSeconds(5), false, CancellationToken.None);
@@ -95,8 +88,7 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
     public async Task Stop_times_out_without_force_and_leaves_process_running()
     {
         var terminal = Registration(_root, Path.Combine(_root, "timeout.json"), "ignore");
-        var pid = await _controller.StartAsync(terminal, CancellationToken.None);
-        Track(pid);
+        var pid = Track(await _controller.StartAsync(terminal, CancellationToken.None));
         await WaitForMainWindowAsync(pid);
 
         var result = await _controller.StopAsync(terminal, TimeSpan.FromMilliseconds(200), false, CancellationToken.None);
@@ -109,8 +101,7 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
     public async Task Stop_force_terminates_process_after_timeout()
     {
         var terminal = Registration(_root, Path.Combine(_root, "force.json"), "ignore");
-        var pid = await _controller.StartAsync(terminal, CancellationToken.None);
-        Track(pid);
+        var pid = Track(await _controller.StartAsync(terminal, CancellationToken.None));
         await WaitForMainWindowAsync(pid);
 
         var result = await _controller.StopAsync(terminal, TimeSpan.FromMilliseconds(200), true, CancellationToken.None);
@@ -122,8 +113,7 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
     public async Task Start_rejects_duplicate_registered_launch()
     {
         var terminal = Registration(_root, Path.Combine(_root, "duplicate.json"), "ignore");
-        var pid = await _controller.StartAsync(terminal, CancellationToken.None);
-        Track(pid);
+        Track(await _controller.StartAsync(terminal, CancellationToken.None));
 
         var act = () => _controller.StartAsync(terminal, CancellationToken.None);
 
@@ -131,16 +121,66 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Same_executable_with_different_launch_identity_is_not_a_duplicate()
+    public async Task Same_executable_name_in_another_install_is_not_a_duplicate()
     {
+        var install = CopyFixtureInstall("other-install");
         var first = Registration(_root, Path.Combine(_root, "first.json"), "ignore", "first");
-        var second = Registration(_root, Path.Combine(_root, "second.json"), "ignore", "second");
         Track(await _controller.StartAsync(first, CancellationToken.None));
+        var second = new TerminalRegistration(Guid.NewGuid(), "Copy", Path.Combine(install, Path.GetFileName(FixturePath)), _root, install,
+            [Path.Combine(_root, "second.json"), "ignore", "second"], DiscoverySource.Manual, true);
 
-        var secondPid = await _controller.StartAsync(second, CancellationToken.None);
-        Track(secondPid);
+        var secondPid = Track(await _controller.StartAsync(second, CancellationToken.None));
 
         secondPid.Should().BePositive();
+    }
+
+    [Fact]
+    public async Task GetStateAsync_reports_externally_started_terminal_as_running()
+    {
+        var terminal = Registration(_root, Path.Combine(_root, "external.json"), "ignore");
+        var external = StartExternally(terminal);
+        await WaitForMainWindowAsync(external.Id);
+
+        var state = await _controller.GetStateAsync(terminal, CancellationToken.None);
+
+        state.Should().Be(new TerminalRuntimeState(TerminalState.Running, external.Id, null));
+    }
+
+    [Fact]
+    public async Task StopAsync_closes_externally_started_terminal_gracefully()
+    {
+        var terminal = Registration(_root, Path.Combine(_root, "external-graceful.json"), "exit");
+        var external = StartExternally(terminal);
+        await WaitForMainWindowAsync(external.Id);
+
+        var result = await _controller.StopAsync(terminal, TimeSpan.FromSeconds(5), false, CancellationToken.None);
+
+        result.Should().Be(new StopResult(StopOutcome.ExitedGracefully, null));
+        external.HasExited.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task StartAsync_rejects_while_externally_started_terminal_runs()
+    {
+        var terminal = Registration(_root, Path.Combine(_root, "external-duplicate.json"), "ignore");
+        var external = StartExternally(terminal);
+
+        var act = () => _controller.StartAsync(terminal, CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+        external.HasExited.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task GetStateAsync_reports_stopped_when_no_matching_process_runs()
+    {
+        var install = CopyFixtureInstall("idle-install");
+        var terminal = new TerminalRegistration(Guid.NewGuid(), "Idle", Path.Combine(install, Path.GetFileName(FixturePath)), _root, install,
+            [Path.Combine(_root, "idle.json"), "ignore"], DiscoverySource.Manual, true);
+
+        var state = await _controller.GetStateAsync(terminal, CancellationToken.None);
+
+        state.Should().Be(new TerminalRuntimeState(TerminalState.Stopped, null, null));
     }
 
     public Task InitializeAsync()
@@ -163,18 +203,69 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
             finally { process.Dispose(); }
         }
 
+        // The controller may have started a process this test never observed, or a failed test may have leaked one.
+        foreach (var leftover in Process.GetProcessesByName("ExitOnClose"))
+        {
+            if (_spawnedIds.Contains(leftover.Id)) { leftover.Dispose(); continue; }
+            try
+            {
+                leftover.Kill(entireProcessTree: true);
+                await leftover.WaitForExitAsync();
+            }
+            catch (InvalidOperationException) { }
+            finally { leftover.Dispose(); }
+        }
+
         Environment.CurrentDirectory = Path.GetTempPath();
         for (var attempt = 0; attempt < 20 && Directory.Exists(_root); attempt++)
         {
             try { Directory.Delete(_root, true); }
-            catch (IOException) { await Task.Delay(50); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { await Task.Delay(50); }
         }
     }
 
     private TerminalRegistration Registration(string workingDirectory, params string[] arguments) =>
         new(Guid.NewGuid(), "Fixture", FixturePath, _root, workingDirectory, arguments, DiscoverySource.Manual, true);
 
-    private void Track(int pid) => _spawned.Add(Process.GetProcessById(pid));
+    private int TrackedProcessCount() =>
+        ((System.Collections.IDictionary)typeof(WindowsTerminalProcessController)
+            .GetField("_processes", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(_controller)!).Count;
+
+    private int Track(int pid)
+    {
+        try
+        {
+            _spawned.Add(Process.GetProcessById(pid));
+            _spawnedIds.Add(pid);
+        }
+        catch (ArgumentException) { }
+        return pid;
+    }
+
+    private Process StartExternally(TerminalRegistration terminal)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = terminal.ExecutablePath,
+            WorkingDirectory = terminal.WorkingDirectory,
+            UseShellExecute = false
+        };
+        foreach (var argument in terminal.Arguments) startInfo.ArgumentList.Add(argument);
+        var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start the external fixture.");
+        _spawned.Add(process);
+        _spawnedIds.Add(process.Id);
+        return process;
+    }
+
+    private string CopyFixtureInstall(string name)
+    {
+        var target = Directory.CreateDirectory(Path.Combine(_root, name)).FullName;
+        foreach (var file in Directory.GetFiles(Path.GetDirectoryName(FixturePath)!))
+            File.Copy(file, Path.Combine(target, Path.GetFileName(file)), true);
+        return target;
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
         for (var attempt = 0; attempt < 100; attempt++)
@@ -184,7 +275,6 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
         }
         throw new TimeoutException("Condition was not reached.");
     }
-
 
     private static async Task WaitForMainWindowAsync(int pid)
     {
