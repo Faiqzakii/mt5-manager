@@ -472,6 +472,29 @@ public sealed class TerminalOperationCoordinatorTests
     }
 
     [Fact]
+    public async Task Preparation_arguments_are_immutable_and_replacement_does_not_consume_original()
+    {
+        var terminalId = Guid.NewGuid();
+        var terminal = Registration(terminalId) with { Arguments = new[] { "/portable", "/config:trusted" } };
+        var cleanup = new FakeCleanupService();
+        var coordinator = Coordinator(new FakeRegistry(terminal), new FakeProcessController(), cleanup, new RecordingAuditLogger());
+        var original = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs));
+
+        original.TerminalSnapshot.Arguments.Should().NotBeAssignableTo<string[]>();
+        var tampered = original with
+        {
+            TerminalSnapshot = original.TerminalSnapshot with { Arguments = new[] { "/config:attacker" } }
+        };
+
+        (await coordinator.ContinueCleanupAsync(tampered, forceApproved: false)).Status
+            .Should().Be(CleanupOutcomeStatus.Rejected);
+        (await coordinator.ContinueCleanupAsync(original, forceApproved: false)).Status
+            .Should().Be(CleanupOutcomeStatus.Completed);
+        original.TerminalSnapshot.Arguments.Should().Equal("/portable", "/config:trusted");
+        cleanup.Requests.Should().ContainSingle();
+    }
+
+    [Fact]
     public async Task Operations_on_the_same_terminal_serialize()
     {
         var terminalId = Guid.NewGuid();

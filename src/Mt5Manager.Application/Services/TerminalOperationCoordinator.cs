@@ -1,4 +1,5 @@
 using System.Collections.Frozen;
+using System.Collections.Immutable;
 using System.Collections.Concurrent;
 using Mt5Manager.Application.Abstractions;
 using Mt5Manager.Domain.Models;
@@ -245,7 +246,7 @@ public sealed class TerminalOperationCoordinator
         (await _registry.LoadAsync(token)).FirstOrDefault(terminal => terminal.Id == id);
     private SemaphoreSlim GateFor(Guid id) => _gates.GetOrAdd(id, static _ => new SemaphoreSlim(1, 1));
     private static TerminalRegistration Snapshot(TerminalRegistration terminal) =>
-        terminal with { Arguments = terminal.Arguments.ToArray() };
+        terminal with { Arguments = terminal.Arguments.ToImmutableArray() };
     private static TerminalRegistration UnknownTerminal(Guid id) =>
         new(id, "Unknown terminal", string.Empty, string.Empty, string.Empty, [], DiscoverySource.Manual, false);
 }
