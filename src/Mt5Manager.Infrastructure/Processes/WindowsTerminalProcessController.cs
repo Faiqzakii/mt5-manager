@@ -51,6 +51,8 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
                 process.Dispose();
                 throw new InvalidOperationException($"Terminal '{terminal.DisplayName}' is already running.");
             }
+            process.EnableRaisingEvents = true;
+            process.Exited += (_, _) => _ = RemoveExitedAsync(terminal.Id, tracked);
             return process.Id;
         }
         finally { _gate.Release(); }
@@ -109,6 +111,17 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
             Remove(terminal.Id, tracked);
             return null;
         }
+    }
+
+    private async Task RemoveExitedAsync(Guid registrationId, TrackedProcess tracked)
+    {
+        try
+        {
+            await _gate.WaitAsync();
+            try { Remove(registrationId, tracked); }
+            finally { _gate.Release(); }
+        }
+        catch (ObjectDisposedException) { }
     }
 
     private static async Task<bool> WaitForExitAsync(Process process, TimeSpan timeout, CancellationToken cancellationToken)

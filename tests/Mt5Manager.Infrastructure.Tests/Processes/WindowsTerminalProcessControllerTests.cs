@@ -47,6 +47,21 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Natural_exit_releases_tracked_process_without_another_controller_call()
+    {
+        var terminal = Registration(_root, Path.Combine(_root, "natural-exit.json"), "self-exit");
+        var pid = await _controller.StartAsync(terminal, CancellationToken.None);
+        Track(pid);
+
+        await _spawned[^1].WaitForExitAsync();
+
+        var processesField = typeof(WindowsTerminalProcessController).GetField("_processes", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var processes = (System.Collections.IDictionary)processesField.GetValue(_controller)!;
+        await WaitUntilAsync(() => processes.Count == 0);
+        processes.Count.Should().Be(0);
+    }
+
+    [Fact]
     public async Task Stop_returns_graceful_exit_when_process_accepts_close()
     {
         var terminal = Registration(_root, Path.Combine(_root, "graceful.json"), "exit");
@@ -144,6 +159,16 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
         new(Guid.NewGuid(), "Fixture", FixturePath, _root, workingDirectory, arguments, DiscoverySource.Manual, true);
 
     private void Track(int pid) => _spawned.Add(Process.GetProcessById(pid));
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            if (condition()) return;
+            await Task.Delay(25);
+        }
+        throw new TimeoutException("Condition was not reached.");
+    }
+
 
     private static async Task WaitForMainWindowAsync(int pid)
     {
