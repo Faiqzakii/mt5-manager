@@ -56,7 +56,7 @@ public sealed class ShortcutDiscoverySource(
         catch (COMException) { return; }
         if (target is null || !Path.GetFileName(target.TargetPath).Equals("terminal64.exe", StringComparison.OrdinalIgnoreCase))
             return;
-        var arguments = WindowsCommandLine.Split($"terminal64.exe {target.Arguments}");
+        var arguments = WindowsProcessQuery.Split($"terminal64.exe {target.Arguments}");
         if (arguments.Count > 0) arguments.RemoveAt(0);
         result.Add(new TerminalRegistration(Guid.NewGuid(), Path.GetFileNameWithoutExtension(shortcut),
             target.TargetPath, string.Empty,

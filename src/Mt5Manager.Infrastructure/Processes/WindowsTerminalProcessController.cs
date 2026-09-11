@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
-using System.Text;
 using Mt5Manager.Application.Abstractions;
 using Mt5Manager.Domain.Models;
 using Mt5Manager.Infrastructure.Discovery;
@@ -10,6 +9,10 @@ namespace Mt5Manager.Infrastructure.Processes;
 
 public sealed class WindowsTerminalProcessController : ITerminalProcessController
 {
+    private static readonly TimeSpan MainWindowGrace = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan KillWait = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(25);
+
     private readonly ConcurrentDictionary<Guid, TrackedProcess> _processes = new();
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly IProcessHandleSource _handles;
@@ -24,15 +27,15 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
         {
             try
             {
-                var match = FindRunningProcess(terminal);
+                var scan = Scan(terminal);
                 try
                 {
-                    if (match.Error is not null) return new TerminalRuntimeState(TerminalState.Error, null, match.Error);
-                    return match.Process is null
+                    if (scan.Error is not null) return new TerminalRuntimeState(TerminalState.Error, null, scan.Error);
+                    return scan.Matches.Count == 0
                         ? new TerminalRuntimeState(TerminalState.Stopped, null, null)
-                        : new TerminalRuntimeState(TerminalState.Running, match.Process.Id, null);
+                        : new TerminalRuntimeState(TerminalState.Running, scan.Matches.Min(process => process.Id), null);
                 }
-                finally { DisposeMatch(match); }
+                finally { scan.Dispose(); }
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
@@ -47,16 +50,16 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
         await _gate.WaitAsync(cancellationToken);
         try
         {
-            var match = FindRunningProcess(terminal);
+            var scan = Scan(terminal);
             try
             {
-                if (match.Process is not null || match.Error is not null)
-                    throw new InvalidOperationException(match.Error ?? $"Terminal '{terminal.DisplayName}' is already running.");
+                if (scan.Error is not null || scan.Matches.Count > 0)
+                    throw new InvalidOperationException(scan.Error ?? $"Terminal '{terminal.DisplayName}' is already running.");
 
                 var startInfo = new ProcessStartInfo
                 {
-                    FileName = CanonicalPath(terminal.ExecutablePath),
-                    WorkingDirectory = CanonicalPath(terminal.WorkingDirectory),
+                    FileName = WindowsProcessQuery.CanonicalPath(terminal.ExecutablePath),
+                    WorkingDirectory = terminal.WorkingDirectory,
                     UseShellExecute = false
                 };
                 foreach (var argument in terminal.Arguments) startInfo.ArgumentList.Add(argument);
@@ -68,7 +71,7 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
                 process.EnableRaisingEvents = true;
                 return process.Id;
             }
-            finally { DisposeMatch(match); }
+            finally { scan.Dispose(); }
         }
         finally { _gate.Release(); }
     }
@@ -78,79 +81,204 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
         await _gate.WaitAsync(cancellationToken);
         try
         {
-            var match = FindRunningProcess(terminal);
+            var scan = Scan(terminal);
             try
             {
-                if (match.Error is not null) return new StopResult(StopOutcome.Failed, match.Error);
-                var process = match.Process;
-                if (process is null) return new StopResult(StopOutcome.AlreadyStopped, null);
+                if (scan.Error is not null) return new StopResult(StopOutcome.Failed, scan.Error);
+                var matches = scan.Matches;
+                if (matches.Count == 0) return new StopResult(StopOutcome.AlreadyStopped, null);
 
-                process.CloseMainWindow();
-                if (await WaitForExitAsync(process, timeout, cancellationToken))
-                {
-                    RemoveTracked(terminal.Id, process);
-                    return new StopResult(StopOutcome.ExitedGracefully, null);
-                }
+                var budget = Stopwatch.StartNew();
+                foreach (var process in matches) await CloseMainWindowAsync(process, WindowGrace(timeout), cancellationToken);
+
+                if (await WaitForAllExitAsync(matches, Remaining(timeout, budget), cancellationToken))
+                    return Release(terminal.Id, matches, StopOutcome.ExitedGracefully);
 
                 if (!force) return new StopResult(StopOutcome.TimedOut, null);
 
-                process.Kill(entireProcessTree: true);
-                await process.WaitForExitAsync(cancellationToken);
-                RemoveTracked(terminal.Id, process);
-                return new StopResult(StopOutcome.ForceTerminated, null);
+                foreach (var process in matches) Kill(process);
+                if (!await WaitForAllExitAsync(matches, KillWait, cancellationToken))
+                    return new StopResult(StopOutcome.Failed, $"Terminal '{terminal.DisplayName}' could not be terminated.");
+
+                return Release(terminal.Id, matches, StopOutcome.ForceTerminated);
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception exception)
             {
                 return new StopResult(StopOutcome.Failed, exception.Message);
             }
-            finally { DisposeMatch(match); }
+            finally { scan.Dispose(); }
         }
         finally { _gate.Release(); }
     }
 
-    // A process the controller started is owned by the tracking table; any other match is owned by this lookup.
-    private ProcessMatch FindRunningProcess(TerminalRegistration terminal)
+    // Every live process belonging to this terminal record: the one this controller started plus any duplicates
+    // launched elsewhere. Processes the controller started are owned by the tracking table; the rest by the scan.
+    private ProcessScan Scan(TerminalRegistration terminal)
     {
+        var matches = new List<Process>();
+        var owned = new List<Process>();
+        var known = new HashSet<int>();
+
         if (_processes.TryGetValue(terminal.Id, out var tracked))
         {
-            if (!tracked.Process.HasExited) return new ProcessMatch(tracked.Process, false, null);
-            Remove(terminal.Id, tracked);
+            if (IsRunning(tracked.Process))
+            {
+                matches.Add(tracked.Process);
+                known.Add(tracked.Process.Id);
+            }
+            else Remove(terminal.Id, tracked);
         }
 
-        var expected = CanonicalPath(terminal.ExecutablePath);
-        var indeterminate = false;
+        var expected = WindowsProcessQuery.CanonicalPath(terminal.ExecutablePath);
+        var candidates = new List<Process>();
+        var unreadableImage = false;
         foreach (var candidate in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(expected)))
         {
-            var actual = ReadExecutablePath(candidate.Id);
-            if (actual is null)
+            if (known.Contains(candidate.Id)) { candidate.Dispose(); continue; }
+            var imagePath = ReadImagePath(candidate.Id);
+            if (imagePath is null)
             {
+                // A terminating process refuses a handle too; only a live one is genuinely opaque.
+                if (IsRunning(candidate)) unreadableImage = true;
                 candidate.Dispose();
-                indeterminate = true;
                 continue;
             }
 
-            if (StringComparer.OrdinalIgnoreCase.Equals(CanonicalPath(actual), expected))
-                return new ProcessMatch(candidate, true, null);
-            candidate.Dispose();
+            if (StringComparer.OrdinalIgnoreCase.Equals(WindowsProcessQuery.CanonicalPath(imagePath), expected))
+                candidates.Add(candidate);
+            else candidate.Dispose();
+        }
+        for (var index = candidates.Count - 1; index >= 0; index--)
+            if (!IsRunning(candidates[index])) { candidates[index].Dispose(); candidates.RemoveAt(index); }
+        owned.AddRange(candidates);
+
+        var dataDirectory = DataDirectory(terminal);
+        if (dataDirectory is null)
+        {
+            // Manual or unverified records carry no data directory to discriminate installs by.
+            matches.AddRange(candidates);
+        }
+        else
+        {
+            var unresolved = 0;
+            foreach (var candidate in candidates)
+            {
+                var candidateData = ReadDataDirectory(candidate.Id);
+                if (candidateData is null) { unresolved++; continue; }
+                if (StringComparer.OrdinalIgnoreCase.Equals(candidateData, dataDirectory)) matches.Add(candidate);
+            }
+
+            if (unresolved > 0)
+            {
+                // A single instance launched without /datadir is unambiguous; several cannot be told apart.
+                if (candidates.Count == 1) matches.Add(candidates[0]);
+                else
+                {
+                    var message = $"The running state of '{expected}' is ambiguous: {candidates.Count} processes match it and at least one data directory could not be read.";
+                    return new ProcessScan([], owned, message);
+                }
+            }
         }
 
-        return indeterminate
-            ? new ProcessMatch(null, false, $"The running state of '{expected}' could not be verified.")
-            : new ProcessMatch(null, false, null);
+        return matches.Count == 0 && unreadableImage
+            ? new ProcessScan([], owned, $"The running state of '{expected}' could not be verified.")
+            : new ProcessScan(matches, owned, null);
     }
 
-    private string? ReadExecutablePath(int processId)
+    private string? ReadImagePath(int processId)
+    {
+        var handle = _handles.Open(processId);
+        if (handle == nint.Zero) return null;
+        try { return WindowsProcessQuery.ReadImagePath(handle); }
+        finally { _handles.Close(handle); }
+    }
+
+    private string? ReadDataDirectory(int processId)
     {
         var handle = _handles.Open(processId);
         if (handle == nint.Zero) return null;
         try
         {
-            var size = 32768;
-            var buffer = new StringBuilder(size);
-            return QueryFullProcessImageName(handle, 0, buffer, ref size) ? buffer.ToString() : null;
+            var commandLine = WindowsProcessQuery.ReadCommandLine(handle);
+            if (commandLine is null) return null;
+            var data = WindowsProcessQuery.FindDataDirectory(commandLine);
+            return data is null ? null : WindowsProcessQuery.CanonicalPath(data);
         }
+        catch (Win32Exception) { return null; }
         finally { _handles.Close(handle); }
+    }
+
+    private static string? DataDirectory(TerminalRegistration terminal) =>
+        terminal.DataDirectoryVerified && !string.IsNullOrWhiteSpace(terminal.DataDirectory)
+            ? WindowsProcessQuery.CanonicalPath(terminal.DataDirectory)
+            : null;
+
+    private static async Task CloseMainWindowAsync(Process process, TimeSpan grace, CancellationToken cancellationToken)
+    {
+        if (CloseMainWindow(process)) return;
+        var budget = Stopwatch.StartNew();
+        while (budget.Elapsed < grace)
+        {
+            await Task.Delay(PollInterval, cancellationToken);
+            if (!IsRunning(process)) return;
+            // A terminal that has only just been launched may not own its main window yet.
+            if (CloseMainWindow(process)) return;
+        }
+    }
+
+    private static bool CloseMainWindow(Process process)
+    {
+        try
+        {
+            process.Refresh();
+            return process.CloseMainWindow();
+        }
+        catch (InvalidOperationException) { return false; }
+    }
+
+    private static void Kill(Process process)
+    {
+        try
+        {
+            if (!IsRunning(process)) return;
+            process.Kill(entireProcessTree: true);
+        }
+        catch (InvalidOperationException) { }
+        catch (Win32Exception) { }
+    }
+
+    private static async Task<bool> WaitForAllExitAsync(IReadOnlyList<Process> processes, TimeSpan wait, CancellationToken cancellationToken)
+    {
+        var budget = Stopwatch.StartNew();
+        while (true)
+        {
+            if (processes.All(process => !IsRunning(process))) return true;
+            if (budget.Elapsed >= wait) return false;
+            await Task.Delay(PollInterval, cancellationToken);
+        }
+    }
+
+    private static bool IsRunning(Process process)
+    {
+        try { return !process.HasExited; }
+        catch (InvalidOperationException) { return false; }
+    }
+
+    private static TimeSpan WindowGrace(TimeSpan timeout) =>
+        timeout >= TimeSpan.Zero && timeout < MainWindowGrace ? timeout : MainWindowGrace;
+
+    private static TimeSpan Remaining(TimeSpan timeout, Stopwatch budget)
+    {
+        if (timeout < TimeSpan.Zero) return timeout;
+        var left = timeout - budget.Elapsed;
+        return left > TimeSpan.Zero ? left : TimeSpan.Zero;
+    }
+
+    private StopResult Release(Guid registrationId, IReadOnlyList<Process> matches, StopOutcome outcome)
+    {
+        foreach (var process in matches) RemoveTracked(registrationId, process);
+        return new StopResult(outcome, null);
     }
 
     private async Task RemoveExitedAsync(Guid registrationId, TrackedProcess tracked)
@@ -162,23 +290,6 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
             finally { _gate.Release(); }
         }
         catch (ObjectDisposedException) { }
-    }
-
-    private static async Task<bool> WaitForExitAsync(Process process, TimeSpan timeout, CancellationToken cancellationToken)
-    {
-        if (timeout < TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan)
-            throw new ArgumentOutOfRangeException(nameof(timeout));
-        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutSource.CancelAfter(timeout);
-        try
-        {
-            await process.WaitForExitAsync(timeoutSource.Token);
-            return true;
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            return false;
-        }
     }
 
     private void RemoveTracked(Guid registrationId, Process process)
@@ -193,19 +304,16 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
             tracked.Process.Dispose();
     }
 
-    private static void DisposeMatch(ProcessMatch match)
-    {
-        if (match.Owned) match.Process?.Dispose();
-    }
-
-    private static string CanonicalPath(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
-
-    // Query rights are all that may be requested: terminals run elevated, the manager does not.
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool QueryFullProcessImageName(nint process, int flags, StringBuilder name, ref int size);
-
     private sealed record TrackedProcess(Process Process);
 
-    private sealed record ProcessMatch(Process? Process, bool Owned, string? Error);
+    private sealed class ProcessScan(List<Process> matches, List<Process> owned, string? error) : IDisposable
+    {
+        public IReadOnlyList<Process> Matches { get; } = matches;
+        public string? Error { get; } = error;
+
+        public void Dispose()
+        {
+            foreach (var process in owned) process.Dispose();
+        }
+    }
 }

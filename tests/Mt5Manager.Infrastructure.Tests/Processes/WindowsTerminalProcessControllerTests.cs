@@ -3,6 +3,7 @@ using System.Text.Json;
 using FluentAssertions;
 using Mt5Manager.Application.Abstractions;
 using Mt5Manager.Domain.Models;
+using Mt5Manager.Infrastructure.Discovery;
 using Mt5Manager.Infrastructure.Processes;
 
 namespace Mt5Manager.Infrastructure.Tests.Processes;
@@ -183,6 +184,92 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
         state.Should().Be(new TerminalRuntimeState(TerminalState.Stopped, null, null));
     }
 
+    [Fact]
+    public async Task Stop_immediately_after_start_closes_terminal_without_waiting_for_timeout()
+    {
+        var terminal = Registration(_root, Path.Combine(_root, "fresh.json"), "exit");
+        Track(await _controller.StartAsync(terminal, CancellationToken.None));
+
+        var result = await _controller.StopAsync(terminal, TimeSpan.FromSeconds(5), false, CancellationToken.None);
+
+        result.Should().Be(new StopResult(StopOutcome.ExitedGracefully, null));
+    }
+
+    [Fact]
+    public async Task Stop_leaves_terminal_of_another_data_directory_running()
+    {
+        var firstData = DataDirectory("sibling-first");
+        var secondData = DataDirectory("sibling-second");
+        var first = RegistrationWithData(firstData, _root, Path.Combine(_root, "sibling-first.json"), "exit", $"/datadir:{firstData}");
+        var second = RegistrationWithData(secondData, _root, Path.Combine(_root, "sibling-second.json"), "exit", $"/datadir:{secondData}");
+        var firstPid = Track(await _controller.StartAsync(first, CancellationToken.None));
+        var secondPid = Track(await _controller.StartAsync(second, CancellationToken.None));
+
+        (await _controller.GetStateAsync(first, CancellationToken.None)).Should().Be(new TerminalRuntimeState(TerminalState.Running, firstPid, null));
+        var result = await _controller.StopAsync(first, TimeSpan.FromSeconds(5), false, CancellationToken.None);
+
+        result.Should().Be(new StopResult(StopOutcome.ExitedGracefully, null));
+        Process.GetProcessById(secondPid).HasExited.Should().BeFalse();
+        (await _controller.GetStateAsync(second, CancellationToken.None)).Should().Be(new TerminalRuntimeState(TerminalState.Running, secondPid, null));
+        var act = () => _controller.StartAsync(second, CancellationToken.None);
+        await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    [Fact]
+    public async Task Stop_closes_every_instance_of_the_same_record_gracefully()
+    {
+        var data = DataDirectory("duplicate-exit");
+        var terminal = RegistrationWithData(data, _root, Path.Combine(_root, "duplicate-exit.json"), "exit", $"/datadir:{data}");
+        var first = StartExternally(terminal);
+        var second = StartExternally(terminal);
+
+        var result = await _controller.StopAsync(terminal, TimeSpan.FromSeconds(5), false, CancellationToken.None);
+
+        result.Should().Be(new StopResult(StopOutcome.ExitedGracefully, null));
+        first.HasExited.Should().BeTrue();
+        second.HasExited.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Stop_reports_timeout_until_every_instance_of_the_record_is_gone()
+    {
+        var data = DataDirectory("duplicate-ignore");
+        var terminal = RegistrationWithData(data, _root, Path.Combine(_root, "duplicate-ignore.json"), "ignore", $"/datadir:{data}");
+        var first = StartExternally(terminal);
+        var second = StartExternally(terminal);
+
+        var timedOut = await _controller.StopAsync(terminal, TimeSpan.FromMilliseconds(300), false, CancellationToken.None);
+
+        timedOut.Should().Be(new StopResult(StopOutcome.TimedOut, null));
+        first.HasExited.Should().BeFalse();
+        second.HasExited.Should().BeFalse();
+
+        var forced = await _controller.StopAsync(terminal, TimeSpan.FromMilliseconds(300), true, CancellationToken.None);
+
+        forced.Should().Be(new StopResult(StopOutcome.ForceTerminated, null));
+        first.HasExited.Should().BeTrue();
+        second.HasExited.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Unreadable_process_identity_reports_error_and_refuses_control()
+    {
+        var terminal = Registration(DataDirectory("opaque"), Path.Combine(_root, "opaque.json"), "ignore");
+        var external = StartExternally(terminal);
+        var controller = new WindowsTerminalProcessController(new OpaqueHandleSource(external.Id));
+
+        var state = await controller.GetStateAsync(terminal, CancellationToken.None);
+
+        state.State.Should().Be(TerminalState.Error);
+        state.Error.Should().NotBeNullOrWhiteSpace();
+        var start = () => controller.StartAsync(terminal, CancellationToken.None);
+        await start.Should().ThrowAsync<InvalidOperationException>();
+        var stop = await controller.StopAsync(terminal, TimeSpan.FromMilliseconds(200), false, CancellationToken.None);
+        stop.Outcome.Should().Be(StopOutcome.Failed);
+        stop.Error.Should().NotBeNullOrWhiteSpace();
+        external.HasExited.Should().BeFalse();
+    }
+
     public Task InitializeAsync()
     {
         Directory.CreateDirectory(_root);
@@ -226,6 +313,11 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
 
     private TerminalRegistration Registration(string workingDirectory, params string[] arguments) =>
         new(Guid.NewGuid(), "Fixture", FixturePath, _root, workingDirectory, arguments, DiscoverySource.Manual, true);
+
+    private TerminalRegistration RegistrationWithData(string dataDirectory, string workingDirectory, params string[] arguments) =>
+        new(Guid.NewGuid(), "Fixture", FixturePath, dataDirectory, workingDirectory, arguments, DiscoverySource.Manual, true);
+
+    private string DataDirectory(string name) => Directory.CreateDirectory(Path.Combine(_root, name)).FullName;
 
     private int TrackedProcessCount() =>
         ((System.Collections.IDictionary)typeof(WindowsTerminalProcessController)
@@ -302,4 +394,13 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
     }
 
     private sealed record LaunchRecord(string[] Arguments, string WorkingDirectory, int ProcessId);
+
+    private sealed class OpaqueHandleSource(int opaqueProcessId) : IProcessHandleSource
+    {
+        private readonly LimitedRightsProcessHandleSource _inner = new();
+
+        public nint Open(int processId) => processId == opaqueProcessId ? nint.Zero : _inner.Open(processId);
+
+        public void Close(nint handle) => _inner.Close(handle);
+    }
 }
