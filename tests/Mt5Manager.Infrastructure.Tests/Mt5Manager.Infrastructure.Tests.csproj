@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net8.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 
@@ -25,6 +25,7 @@
     <ProjectReference Include="..\..\src\Mt5Manager.Domain\Mt5Manager.Domain.csproj" />
     <ProjectReference Include="..\..\src\Mt5Manager.Application\Mt5Manager.Application.csproj" />
     <ProjectReference Include="..\..\src\Mt5Manager.Infrastructure\Mt5Manager.Infrastructure.csproj" />
+    <ProjectReference Include="..\Fixtures\ExitOnClose\ExitOnClose.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>
