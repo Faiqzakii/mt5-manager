@@ -100,7 +100,15 @@ public sealed class TerminalOperationCoordinator
     {
         ArgumentNullException.ThrowIfNull(preparation);
         var gate = GateFor(preparation.Request.TerminalId);
-        await gate.WaitAsync(cancellationToken);
+        try { await gate.WaitAsync(cancellationToken); }
+        catch (OperationCanceledException)
+        {
+            // The dialog was abandoned before this operation started: hand the reservation back, or the
+            // terminal stays blocked for every later cleanup until the application restarts.
+            Discard(preparation.ReservationToken);
+            Release(preparation);
+            throw;
+        }
         try
         {
             if (TryConsumeIssuedRejection(preparation))
@@ -164,36 +172,45 @@ public sealed class TerminalOperationCoordinator
         var request = preparation.Request;
         var wasRunning = preparation.WasRunning;
         var shutdown = wasRunning ? ShutdownMethod.Graceful : ShutdownMethod.None;
-        if (preparation.Status == CleanupPreparationStatus.RequiresForceConfirmation)
-        {
-            if (!forceApproved) return await DeclineAsync(terminal, request, wasRunning);
-            var stop = await _processController.StopAsync(terminal, _stopTimeout, true, cancellationToken);
-            if (stop.Outcome is not (StopOutcome.ForceTerminated or StopOutcome.ExitedGracefully or StopOutcome.AlreadyStopped))
-                return await FailAsync(terminal, request, wasRunning, ShutdownMethod.Force,
-                    stop.Error ?? "The terminal could not be force terminated.");
-            shutdown = ShutdownMethod.Force;
-        }
-        else
-        {
-            // The preparation can be minutes old: never delete the data of a terminal that is running again.
-            var state = await _processController.GetStateAsync(terminal, cancellationToken);
-            if (state.State == TerminalState.Error)
-                return await FailAsync(terminal, request, wasRunning, ShutdownMethod.None,
-                    state.Error ?? "The terminal state could not be determined, so no files were deleted.");
-            if (state.State != TerminalState.Stopped)
-            {
-                var stop = await _processController.StopAsync(terminal, _stopTimeout, false, cancellationToken);
-                if (stop.Outcome is not (StopOutcome.ExitedGracefully or StopOutcome.AlreadyStopped))
-                    return await FailAsync(terminal, request, true, ShutdownMethod.Graceful,
-                        stop.Error ?? "The terminal is running again and could not be stopped, so no files were deleted.");
-                wasRunning = true;
-                shutdown = ShutdownMethod.Graceful;
-            }
-        }
-
         IReadOnlyList<CleanupCategoryResult> results = [];
         string? cleanupError = null;
-        try { results = await _cleanupService.CleanAsync(terminal, request.Categories, cancellationToken); }
+        try
+        {
+            if (preparation.Status == CleanupPreparationStatus.RequiresForceConfirmation)
+            {
+                if (!forceApproved) return await DeclineAsync(terminal, request, wasRunning);
+                var stop = await _processController.StopAsync(terminal, _stopTimeout, true, cancellationToken);
+                if (stop.Outcome is not (StopOutcome.ForceTerminated or StopOutcome.ExitedGracefully or StopOutcome.AlreadyStopped))
+                    return await FailAsync(terminal, request, wasRunning, ShutdownMethod.Force,
+                        stop.Error ?? "The terminal could not be force terminated.");
+                shutdown = ShutdownMethod.Force;
+            }
+            else
+            {
+                // The preparation can be minutes old: never delete the data of a terminal that is running again.
+                var state = await _processController.GetStateAsync(terminal, cancellationToken);
+                if (state.State == TerminalState.Error)
+                    return await FailAsync(terminal, request, wasRunning, ShutdownMethod.None,
+                        state.Error ?? "The terminal state could not be determined, so no files were deleted.");
+                if (state.State != TerminalState.Stopped)
+                {
+                    // The terminal has to be running again even when this operation is abandoned half way
+                    // through, so the intent is recorded before the stop is attempted.
+                    wasRunning = true;
+                    shutdown = ShutdownMethod.Graceful;
+                    var stop = await _processController.StopAsync(terminal, _stopTimeout, false, cancellationToken);
+                    if (stop.Outcome is not (StopOutcome.ExitedGracefully or StopOutcome.AlreadyStopped))
+                        return await FailAsync(terminal, request, true, ShutdownMethod.Graceful,
+                            stop.Error ?? "The terminal is running again and could not be stopped, so no files were deleted.");
+                }
+            }
+
+            results = await _cleanupService.CleanAsync(terminal, request.Categories, cancellationToken);
+            // Every requested category was refused and nothing was deleted: report why instead of hiding
+            // the refusal behind a "Completed: 0 deleted" outcome.
+            if (results.Count > 0 && results.All(category => category.DeletedFiles == 0 && category.Failures.Count > 0))
+                cleanupError = results[0].Failures[0].Error;
+        }
         catch (Exception exception)
         {
             cleanupError = exception is OperationCanceledException ? "The cleanup was canceled." : exception.Message;
@@ -203,7 +220,19 @@ public sealed class TerminalOperationCoordinator
         string? restartError = null;
         if (wasRunning)
         {
-            try { await _processController.StartAsync(terminal, CancellationToken.None); restarted = true; }
+            try
+            {
+                // A terminal that was running is left running, but never started twice: an abandoned stop
+                // can leave it alive, and the state is the only trustworthy answer.
+                var state = await _processController.GetStateAsync(terminal, CancellationToken.None);
+                if (state.State == TerminalState.Stopped)
+                {
+                    await _processController.StartAsync(terminal, CancellationToken.None);
+                    restarted = true;
+                }
+                else if (state.State == TerminalState.Error)
+                    restartError = state.Error ?? "The terminal state could not be determined, so it was not started again.";
+            }
             catch (Exception exception) { restartError = exception.Message; }
         }
 

@@ -84,7 +84,7 @@ public sealed class TerminalOperationCoordinatorTests
         outcome.Result.WasRunning.Should().BeTrue();
         outcome.Result.Restarted.Should().BeTrue();
         outcome.Result.RestartError.Should().BeNull();
-        controller.StateCalls.Should().Be(2, "the state is captured before the operation and re-verified before deletion");
+        controller.StateCalls.Should().Be(3, "the state is captured before the operation, re-verified before deletion and checked before the restart");
         controller.StartedTerminals.Should().Equal(terminalId);
         cleanup.Requests.Should().ContainSingle();
 
@@ -632,6 +632,80 @@ public sealed class TerminalOperationCoordinatorTests
         cleanup.Requests.Should().ContainSingle();
     }
 
+    [Fact]
+    public async Task Cancellation_while_the_terminal_is_stopped_again_restores_it_and_records_the_abandonment()
+    {
+        var terminalId = Guid.NewGuid();
+        var controller = new FakeProcessController();
+        var cleanup = new FakeCleanupService();
+        var audit = new RecordingAuditLogger();
+        var coordinator = Coordinator(new FakeRegistry(Registration(terminalId)), controller, cleanup, audit);
+        var preparation = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs));
+
+        using var cancellation = new CancellationTokenSource();
+        controller.State = new TerminalRuntimeState(TerminalState.Running, 99, null);
+        controller.StopResultFor = _ =>
+        {
+            // The close message reaches the terminal, then the dialog is closed during the wait.
+            controller.State = new TerminalRuntimeState(TerminalState.Stopped, null, null);
+            cancellation.Cancel();
+            return new StopResult(StopOutcome.ExitedGracefully, null);
+        };
+
+        var outcome = await coordinator.ContinueCleanupAsync(preparation, forceApproved: false, cancellation.Token);
+
+        outcome.Status.Should().Be(CleanupOutcomeStatus.Rejected);
+        outcome.Message.Should().Be("The cleanup was canceled.");
+        outcome.Result.Restarted.Should().BeTrue("the terminal was running when the cleanup was abandoned");
+        cleanup.Requests.Should().BeEmpty();
+        controller.StartedTerminals.Should().Equal(terminalId);
+
+        var record = audit.Records.Should().ContainSingle().Subject;
+        record.Outcome.Should().Be(AuditOutcome.Rejected);
+        record.WasRunning.Should().BeTrue();
+        record.ShutdownMethod.Should().Be(ShutdownMethod.Graceful);
+        record.Restarted.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Every_category_refused_reports_the_reason_instead_of_a_completed_cleanup()
+    {
+        var terminalId = Guid.NewGuid();
+        var cleanup = new FakeCleanupService
+        {
+            ResultFactory = (terminal, categories) => categories
+                .Select(category => new CleanupCategoryResult(category, 0, 0,
+                    [new FileFailure(terminal.DataDirectory, "The data directory is a reparse point.")]))
+                .ToArray()
+        };
+        var audit = new RecordingAuditLogger();
+        var coordinator = Coordinator(new FakeRegistry(Registration(terminalId)), new FakeProcessController(), cleanup, audit);
+        var preparation = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs, CleanupCategory.Ticks));
+
+        var outcome = await coordinator.ContinueCleanupAsync(preparation, forceApproved: false);
+
+        outcome.Status.Should().Be(CleanupOutcomeStatus.Rejected);
+        outcome.Message.Should().Be("The data directory is a reparse point.");
+        audit.Records.Should().ContainSingle().Which.Outcome.Should().Be(AuditOutcome.Rejected);
+    }
+
+    [Fact]
+    public async Task Cancelling_continue_before_it_starts_releases_the_reservation()
+    {
+        var terminalId = Guid.NewGuid();
+        var coordinator = Coordinator(new FakeRegistry(Registration(terminalId)), new FakeProcessController(),
+            new FakeCleanupService(), new RecordingAuditLogger());
+        var preparation = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs));
+        using var cancellation = new CancellationTokenSource();
+        await cancellation.CancelAsync();
+
+        var abandon = () => coordinator.ContinueCleanupAsync(preparation, forceApproved: false, cancellation.Token);
+        await abandon.Should().ThrowAsync<OperationCanceledException>();
+
+        (await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Ticks)))
+            .Status.Should().Be(CleanupPreparationStatus.Ready);
+    }
+
     private static TerminalOperationCoordinator Coordinator(
         ITerminalRegistry registry,
         ITerminalProcessController controller,
@@ -678,14 +752,20 @@ public sealed class TerminalOperationCoordinatorTests
         public Task<int> StartAsync(TerminalRegistration terminal, CancellationToken cancellationToken)
         {
             StartedTerminals.Add(terminal.Id);
-            return StartException is null ? Task.FromResult(4242) : Task.FromException<int>(StartException);
+            if (StartException is not null) return Task.FromException<int>(StartException);
+            State = new TerminalRuntimeState(TerminalState.Running, 4242, null);
+            return Task.FromResult(4242);
         }
 
         public Task<StopResult> StopAsync(TerminalRegistration terminal, TimeSpan timeout, bool force, CancellationToken cancellationToken)
         {
             StopForces.Add(force);
             StopTimeouts.Add(timeout);
-            return Task.FromResult(StopResultFor(force));
+            var result = StopResultFor(force);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (result.Outcome is StopOutcome.ExitedGracefully or StopOutcome.AlreadyStopped or StopOutcome.ForceTerminated)
+                State = new TerminalRuntimeState(TerminalState.Stopped, null, null);
+            return Task.FromResult(result);
         }
     }
 

@@ -23,9 +23,16 @@ public sealed partial class CleanupViewModel:ObservableObject
             IsBusy=true;Error=null;
             var issued=await coordinator.PrepareCleanupAsync(new(terminal.Id,Categories.Where(x=>x.IsSelected).Select(x=>x.Category).ToHashSet()),preparationCancellation.Token);
             if(preparationCancellation.IsCancellationRequested){await coordinator.CancelPreparationAsync(issued);return;}
+            if(issued.Status==CleanupPreparationStatus.Rejected)
+            {
+                // A rejected preparation is a dead end, not an operation: drop it together with its
+                // reservation so the user can fix the cause and prepare again without closing the dialog.
+                Error=issued.Message;
+                await coordinator.CancelPreparationAsync(issued);
+                return;
+            }
             SetPreparation(issued);
             RequiresForceConfirmation=issued.Status==CleanupPreparationStatus.RequiresForceConfirmation;
-            if(issued.Status==CleanupPreparationStatus.Rejected)Error=issued.Message;
         }
         catch(OperationCanceledException){}
         catch(Exception ex){Error=ex.Message;}
