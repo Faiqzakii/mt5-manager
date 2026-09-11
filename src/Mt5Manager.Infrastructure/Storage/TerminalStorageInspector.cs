@@ -13,6 +13,12 @@ public sealed class TerminalStorageInspector(ICleanupTargetResolver targetResolv
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(terminal);
+        return Task.Run<IReadOnlyList<CategoryUsage>>(
+            () => Perform(terminal, cancellationToken), cancellationToken);
+    }
+
+    private IReadOnlyList<CategoryUsage> Perform(TerminalRegistration terminal, CancellationToken cancellationToken)
+    {
         var result = new CategoryUsage[Categories.Length];
 
         for (var index = 0; index < Categories.Length; index++)
@@ -22,19 +28,34 @@ public sealed class TerminalStorageInspector(ICleanupTargetResolver targetResolv
             long fileCount = 0;
             long bytes = 0;
 
-            foreach (var target in targetResolver.Resolve(terminal, category))
+            try
             {
-                foreach (var path in EnumerateFiles(target, cancellationToken))
+                foreach (var target in targetResolver.Resolve(terminal, category))
                 {
-                    fileCount++;
-                    bytes += new FileInfo(path).Length;
+                    foreach (var path in EnumerateFiles(target, cancellationToken))
+                    {
+                        long length;
+                        try { length = new FileInfo(path).Length; }
+                        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                        {
+                            continue;
+                        }
+
+                        fileCount++;
+                        bytes += length;
+                    }
                 }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                // A preview must stay useful when one category cannot be resolved: report the
+                // remaining categories instead of turning the whole preview into an error.
             }
 
             result[index] = new CategoryUsage(category, fileCount, bytes);
         }
 
-        return Task.FromResult<IReadOnlyList<CategoryUsage>>(result);
+        return result;
     }
 
     private static IEnumerable<string> EnumerateFiles(string root, CancellationToken cancellationToken)
@@ -45,14 +66,38 @@ public sealed class TerminalStorageInspector(ICleanupTargetResolver targetResolv
         while (pending.TryPop(out var directory))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            foreach (var path in Directory.EnumerateFileSystemEntries(directory))
+            IEnumerator<string>? entries = null;
+            try
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var attributes = File.GetAttributes(path);
-                if ((attributes & FileAttributes.Directory) == 0)
-                    yield return path;
-                else if ((attributes & FileAttributes.ReparsePoint) == 0)
-                    pending.Push(path);
+                entries = Directory.EnumerateFileSystemEntries(directory).GetEnumerator();
+                while (true)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    string path;
+                    try
+                    {
+                        if (!entries.MoveNext()) break;
+                        path = entries.Current;
+                    }
+                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                    {
+                        break;
+                    }
+
+                    FileAttributes attributes;
+                    try { attributes = File.GetAttributes(path); }
+                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                    {
+                        continue;
+                    }
+
+                    if ((attributes & FileAttributes.Directory) == 0) yield return path;
+                    else if ((attributes & FileAttributes.ReparsePoint) == 0) pending.Push(path);
+                }
+            }
+            finally
+            {
+                entries?.Dispose();
             }
         }
     }

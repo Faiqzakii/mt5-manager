@@ -11,14 +11,43 @@ public sealed partial class CleanupViewModel:ObservableObject
 {
     readonly TerminalRegistration terminal; readonly ITerminalStorageInspector inspector; readonly TerminalOperationCoordinator coordinator; CleanupPreparation? preparation; CancellationTokenSource preparationCancellation=new();
     public CleanupViewModel(TerminalRegistration terminal,ITerminalStorageInspector inspector,TerminalOperationCoordinator coordinator){this.terminal=terminal;this.inspector=inspector;this.coordinator=coordinator;Categories=[..Enum.GetValues<CleanupCategory>().Select(x=>new CleanupCategoryViewModel(x))];foreach(var c in Categories)c.PropertyChanged+=(_,_)=>OnPropertyChanged(nameof(CanPrepare));}
-    public IReadOnlyList<CleanupCategoryViewModel> Categories{get;} public bool CanPrepare=>terminal.DataDirectoryVerified&&Categories.Any(x=>x.IsSelected)&&IsDestructiveConfirmed&&!IsBusy; public bool CanContinue=>preparation?.Status==CleanupPreparationStatus.Ready&&!IsBusy;
+    public IReadOnlyList<CleanupCategoryViewModel> Categories{get;} public bool CanPrepare=>terminal.DataDirectoryVerified&&preparation is null&&Categories.Any(x=>x.IsSelected)&&IsDestructiveConfirmed&&!IsBusy; public bool CanContinue=>preparation?.Status==CleanupPreparationStatus.Ready&&!IsBusy; public bool CanForceContinue=>preparation is not null&&!IsBusy;
     [ObservableProperty] string preview="Select categories to preview cleanup."; [ObservableProperty] bool requiresForceConfirmation; [ObservableProperty] string resultText=""; [ObservableProperty] string? error;
-    [ObservableProperty][NotifyPropertyChangedFor(nameof(CanPrepare))] bool isDestructiveConfirmed; [ObservableProperty][NotifyPropertyChangedFor(nameof(CanPrepare),nameof(CanContinue))] bool isBusy;
-    public async Task LoadPreviewAsync(){if(!terminal.DataDirectoryVerified){Error="Cleanup requires a verified terminal data directory.";return;}try{IsBusy=true;var usage=await inspector.InspectAsync(terminal,preparationCancellation.Token);Preview=string.Join(Environment.NewLine,usage.Select(x=>$"{x.Category}: {x.FileCount} files, {x.Bytes:N0} bytes"));}catch(Exception ex)when(ex is not OperationCanceledException){Error=ex.Message;}finally{IsBusy=false;}}
-    public async Task PrepareAsync(){if(!CanPrepare)return;try{IsBusy=true;Error=null;SetPreparation(await coordinator.PrepareCleanupAsync(new(terminal.Id,Categories.Where(x=>x.IsSelected).Select(x=>x.Category).ToHashSet()),preparationCancellation.Token));RequiresForceConfirmation=preparation!.Status==CleanupPreparationStatus.RequiresForceConfirmation;if(preparation.Status==CleanupPreparationStatus.Rejected)Error=preparation.Message;}catch(Exception ex)when(ex is not OperationCanceledException){Error=ex.Message;}finally{IsBusy=false;}}
-    public async Task ContinueAsync(bool force){if(preparation is null)return;try{IsBusy=true;var outcome=await coordinator.ContinueCleanupAsync(preparation,force,preparationCancellation.Token);SetPreparation(null);var failures=outcome.Result.Categories.Sum(x=>x.Failures.Count);ResultText=$"{outcome.Status}: {outcome.Result.Categories.Sum(x=>x.DeletedFiles)} deleted, {failures} failed. "+(outcome.Result.Restarted?"Restarted.":outcome.Result.RestartError is null?"Not restarted.":$"Restart failed: {outcome.Result.RestartError}");Error=outcome.Message;}catch(Exception ex)when(ex is not OperationCanceledException){Error=ex.Message;}finally{IsBusy=false;}}
-    public async Task CancelPreparationAsync(){preparationCancellation.Cancel();if(preparation is not null)await coordinator.CancelPreparationAsync(preparation);SetPreparation(null);}
-    void SetPreparation(CleanupPreparation? value){preparation=value;OnPropertyChanged(nameof(CanContinue));}
+    [ObservableProperty][NotifyPropertyChangedFor(nameof(CanPrepare))] bool isDestructiveConfirmed; [ObservableProperty][NotifyPropertyChangedFor(nameof(CanPrepare),nameof(CanContinue),nameof(CanForceContinue))] bool isBusy;
+    public async Task LoadPreviewAsync(){if(!terminal.DataDirectoryVerified){Error="Cleanup requires a verified terminal data directory.";return;}try{IsBusy=true;var usage=await inspector.InspectAsync(terminal,preparationCancellation.Token);Preview=string.Join(Environment.NewLine,usage.Select(x=>$"{x.Category}: {x.FileCount} files, {x.Bytes:N0} bytes"));}catch(OperationCanceledException){}catch(Exception ex){Error=ex.Message;}finally{IsBusy=false;}}
+    public async Task PrepareAsync()
+    {
+        if(!CanPrepare)return;
+        try
+        {
+            IsBusy=true;Error=null;
+            var issued=await coordinator.PrepareCleanupAsync(new(terminal.Id,Categories.Where(x=>x.IsSelected).Select(x=>x.Category).ToHashSet()),preparationCancellation.Token);
+            if(preparationCancellation.IsCancellationRequested){await coordinator.CancelPreparationAsync(issued);return;}
+            SetPreparation(issued);
+            RequiresForceConfirmation=issued.Status==CleanupPreparationStatus.RequiresForceConfirmation;
+            if(issued.Status==CleanupPreparationStatus.Rejected)Error=issued.Message;
+        }
+        catch(OperationCanceledException){}
+        catch(Exception ex){Error=ex.Message;}
+        finally{IsBusy=false;}
+    }
+    public async Task ContinueAsync(bool force)
+    {
+        if(preparation is null||IsBusy)return;
+        try
+        {
+            IsBusy=true;
+            var outcome=await coordinator.ContinueCleanupAsync(preparation,force,preparationCancellation.Token);
+            var failures=outcome.Result.Categories.Sum(x=>x.Failures.Count);
+            ResultText=$"{outcome.Status}: {outcome.Result.Categories.Sum(x=>x.DeletedFiles)} deleted, {failures} failed. "+(outcome.Result.Restarted?"Restarted.":outcome.Result.RestartError is null?"Not restarted.":$"Restart failed: {outcome.Result.RestartError}");
+            Error=outcome.Message;
+        }
+        catch(OperationCanceledException){}
+        catch(Exception ex){Error=ex.Message;}
+        finally{SetPreparation(null);IsBusy=false;}
+    }
+    public async Task CancelPreparationAsync(){preparationCancellation.Cancel();var pending=preparation;if(pending is not null)await coordinator.CancelPreparationAsync(pending);SetPreparation(null);}
+    void SetPreparation(CleanupPreparation? value){preparation=value;if(value is null)RequiresForceConfirmation=false;OnPropertyChanged(nameof(CanContinue));OnPropertyChanged(nameof(CanPrepare));OnPropertyChanged(nameof(CanForceContinue));}
 }
 
 public sealed partial class ManualRegistrationViewModel(Func<string,bool>? fileExists=null,Func<string,bool>? directoryExists=null):ObservableObject

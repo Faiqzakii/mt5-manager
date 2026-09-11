@@ -90,12 +90,55 @@ public sealed class ViewModelTests
         vm.IsValid.Should().BeTrue(); vm.CreateRegistration().DataDirectoryVerified.Should().BeTrue();
     }
 
+    [Fact]
+    public async Task Prepared_cleanup_blocks_a_second_preparation_until_it_is_finished()
+    {
+        var terminal=T(); var vm=new CleanupViewModel(terminal,new Inspector(),CoordinatorFor(terminal,false)); vm.Categories[0].IsSelected=true; vm.IsDestructiveConfirmed=true;
+        await vm.PrepareAsync();
+        vm.CanPrepare.Should().BeFalse("the terminal is reserved by the outstanding preparation");
+        vm.CanForceContinue.Should().BeTrue();
+        await vm.ContinueAsync(false);
+        vm.CanPrepare.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Repeated_force_clicks_are_ignored_while_the_cleanup_is_running()
+    {
+        var terminal=T(); var cleaner=new BlockingCleaner(); var vm=new CleanupViewModel(terminal,new Inspector(),CoordinatorFor(terminal,true,cleaner));
+        vm.Categories[0].IsSelected=true; vm.IsDestructiveConfirmed=true; await vm.PrepareAsync();
+        vm.RequiresForceConfirmation.Should().BeTrue();
+        var first=vm.ContinueAsync(true); await cleaner.Started.Task;
+        await vm.ContinueAsync(true);
+        vm.IsBusy.Should().BeTrue(); vm.Error.Should().BeNull();
+        cleaner.Release.SetResult(); await first;
+        cleaner.Calls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Cancelled_dialog_neither_escapes_nor_keeps_the_reservation()
+    {
+        var terminal=T(); var coordinator=CoordinatorFor(terminal,false); var vm=new CleanupViewModel(terminal,new Inspector(),coordinator); vm.Categories[0].IsSelected=true; vm.IsDestructiveConfirmed=true;
+        await vm.CancelPreparationAsync();
+        await vm.PrepareAsync();
+        vm.Error.Should().BeNull();
+        (await coordinator.PrepareCleanupAsync(new(terminal.Id,new HashSet<CleanupCategory>{CleanupCategory.Logs}))).Status.Should().Be(CleanupPreparationStatus.Ready);
+    }
+
+    [Fact]
+    public async Task Manual_registration_surfaces_registry_write_failures()
+    {
+        var vm=new MainViewModel(new Discovery([]),new Registry{ThrowOnSave=true},new Process());
+        await vm.AddManualAsync(T());
+        vm.Error.Should().NotBeNullOrWhiteSpace();
+        vm.Terminals.Should().BeEmpty();
+    }
+
     sealed class Discovery(IReadOnlyList<TerminalRegistration> items):ITerminalDiscovery { public IReadOnlyList<TerminalRegistration> Items=items; public Task<IReadOnlyList<TerminalRegistration>> DiscoverAsync(CancellationToken c=default)=>Task.FromResult(Items); }
-    sealed class Registry:ITerminalRegistry { public IReadOnlyList<TerminalRegistration> Items=[]; public Task<IReadOnlyList<TerminalRegistration>> LoadAsync(CancellationToken c=default)=>Task.FromResult(Items); public Task SaveAsync(IReadOnlyList<TerminalRegistration> t,CancellationToken c=default){Items=t;return Task.CompletedTask;} }
+    sealed class Registry:ITerminalRegistry { public IReadOnlyList<TerminalRegistration> Items=[]; public bool ThrowOnSave; public Task<IReadOnlyList<TerminalRegistration>> LoadAsync(CancellationToken c=default)=>Task.FromResult(Items); public Task SaveAsync(IReadOnlyList<TerminalRegistration> t,CancellationToken c=default){if(ThrowOnSave)throw new IOException("The registry is locked.");Items=t;return Task.CompletedTask;} }
     sealed class Process:ITerminalProcessController { public TerminalRuntimeState State=new(TerminalState.Running,1,null); public bool ThrowStart; public bool Timeout; public StopOutcome? StopOutcome; public int StartCalls; public Task<TerminalRuntimeState> GetStateAsync(TerminalRegistration t,CancellationToken c)=>Task.FromResult(State); public Task<int> StartAsync(TerminalRegistration t,CancellationToken c){StartCalls++;if(ThrowStart)throw new InvalidOperationException("boom");State=new(TerminalState.Running,1,null);return Task.FromResult(1);} public Task<StopResult> StopAsync(TerminalRegistration t,TimeSpan x,bool force,CancellationToken c){var outcome=force?Mt5Manager.Application.Abstractions.StopOutcome.ForceTerminated:StopOutcome??(Timeout?Mt5Manager.Application.Abstractions.StopOutcome.TimedOut:Mt5Manager.Application.Abstractions.StopOutcome.ExitedGracefully);return Task.FromResult(new StopResult(outcome,outcome==Mt5Manager.Application.Abstractions.StopOutcome.Failed?"stop failed":null));} }
     sealed class Inspector:ITerminalStorageInspector { public Task<IReadOnlyList<CategoryUsage>> InspectAsync(TerminalRegistration t,CancellationToken c)=>Task.FromResult<IReadOnlyList<CategoryUsage>>([new(CleanupCategory.Logs,12,1200)]); }
     sealed class Cleaner:ITerminalCleanupService { public Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(TerminalRegistration t,IReadOnlySet<CleanupCategory> c,CancellationToken x)=>Task.FromResult<IReadOnlyList<CleanupCategoryResult>>([new(CleanupCategory.Logs,11,1100,[new("locked","denied")])]); }
-    sealed class BlockingCleaner:ITerminalCleanupService { public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously); public async Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(TerminalRegistration t,IReadOnlySet<CleanupCategory> c,CancellationToken x){Started.SetResult();await Release.Task;return [];} }
+    sealed class BlockingCleaner:ITerminalCleanupService { public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously); public int Calls; public async Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(TerminalRegistration t,IReadOnlySet<CleanupCategory> c,CancellationToken x){Calls++;Started.SetResult();await Release.Task;return [];} }
     sealed class Audit:IAuditLogger { public Task AppendAsync(AuditRecord r,CancellationToken c=default)=>Task.CompletedTask; }
     static TerminalOperationCoordinator CoordinatorFor(TerminalRegistration t,bool timeout=true,ITerminalCleanupService? cleaner=null){var r=new Registry{Items=[t]};return new(r,new Process{Timeout=timeout},cleaner??new Cleaner(),new Audit());}
 }

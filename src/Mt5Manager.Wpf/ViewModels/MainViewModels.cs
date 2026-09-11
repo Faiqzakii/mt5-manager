@@ -12,8 +12,8 @@ public sealed partial class MainViewModel(ITerminalDiscovery discovery,ITerminal
  partial void OnSearchTextChanged(string value)=>ApplyFilter();
  [RelayCommand]public async Task RefreshAsync(){refresh?.Cancel();refresh?.Dispose();refresh=new();IsRefreshing=true;Error=null;try{var found=await discovery.DiscoverAsync(refresh.Token);var rows=found.Select(x=>new TerminalRowViewModel(x,process,inspector)).ToArray();await Task.WhenAll(rows.Select(x=>x.RefreshStateAsync(refresh.Token)));all.Clear();all.AddRange(rows);ApplyFilter();}catch(OperationCanceledException){}catch(Exception ex){Error=ex.Message;}finally{IsRefreshing=false;}}
  void ApplyFilter(){Terminals.Clear();foreach(var row in all.Where(x=>string.IsNullOrWhiteSpace(SearchText)||x.DisplayName.Contains(SearchText,StringComparison.OrdinalIgnoreCase)||x.ExecutablePath.Contains(SearchText,StringComparison.OrdinalIgnoreCase)))Terminals.Add(row);}
- public async Task AddManualAsync(TerminalRegistration terminal){var items=(await registry.LoadAsync()).Where(x=>x.Id!=terminal.Id).Append(terminal).ToArray();await registry.SaveAsync(items);await RefreshAsync();}public void CancelRefresh()=>refresh?.Cancel();
- public async Task RefreshStatesAsync(CancellationToken token=default){foreach(var row in all.ToArray()){if(token.IsCancellationRequested)return;await row.RefreshStateAsync(token);}}
+ public async Task AddManualAsync(TerminalRegistration terminal){try{var items=(await registry.LoadAsync()).Where(x=>x.Id!=terminal.Id).Append(terminal).ToArray();await registry.SaveAsync(items);}catch(Exception ex){Error=$"The terminal could not be registered: {ex.Message}";return;}await RefreshAsync();}public void CancelRefresh()=>refresh?.Cancel();
+ public async Task RefreshStatesAsync(CancellationToken token=default){foreach(var row in all.ToArray()){if(token.IsCancellationRequested)return;try{await row.RefreshStateAsync(token);}catch(OperationCanceledException)when(token.IsCancellationRequested){return;}}}
 }
 public sealed partial class TerminalRowViewModel(TerminalRegistration terminal,ITerminalProcessController process,ITerminalStorageInspector? inspector=null):ObservableObject
 {

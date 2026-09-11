@@ -91,6 +91,24 @@ public sealed class CleanupTargetResolverTests : IDisposable
         }
     }
 
+    [Fact]
+    public void Resolve_rejects_a_drive_root_as_the_data_directory()
+    {
+        var driveRoot = Path.GetPathRoot(_root)!;
+
+        var act = () => new CleanupTargetResolver().Resolve(Registration(driveRoot), CleanupCategory.Logs);
+
+        act.Should().Throw<InvalidOperationException>().WithMessage("*drive root*");
+    }
+
+    [Fact]
+    public void Resolve_rejects_a_network_data_directory()
+    {
+        var act = () => new CleanupTargetResolver().Resolve(Registration(@"\\server\share\data"), CleanupCategory.Logs);
+
+        act.Should().Throw<InvalidOperationException>().WithMessage("*local*");
+    }
+
     private static void CreateJunction(string link, string target)
     {
         using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo

@@ -76,17 +76,73 @@ public sealed class TerminalCleanupServiceTests : StorageTestBase
         }
     }
 
-    private static void SetDirectoryDeny(string path, string identity, bool deny)
+    [Fact]
+    public async Task CleanAsync_refuses_to_traverse_a_target_that_is_a_reparse_point()
     {
-        using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        var outside = CreateOutsideDirectory();
+        var escaped = WriteOutsideFile(outside, new byte[13], "escaped.log");
+        var link = CreateJunction(Path.Combine(Root, "Logs"), outside);
+
+        try
         {
-            FileName = "icacls.exe",
-            ArgumentList = { path, deny ? "/deny" : "/remove:d", deny ? $"*{identity}:(OI)(CI)F" : $"*{identity}" },
-            UseShellExecute = false,
-            CreateNoWindow = true
-        }) ?? throw new InvalidOperationException("Could not start icacls.");
-        process.WaitForExit();
-        if (process.ExitCode != 0) throw new InvalidOperationException("Could not update test directory ACL.");
+            var result = await new TerminalCleanupService(new StubResolver(Root, "Logs"))
+                .CleanAsync(Registration, new HashSet<CleanupCategory> { CleanupCategory.Logs }, CancellationToken.None);
+
+            File.Exists(escaped).Should().BeTrue("a reparse target must never be traversed");
+            var category = result.Single();
+            category.DeletedFiles.Should().Be(0);
+            category.Failures.Should().ContainSingle(x => x.Path == link && !string.IsNullOrWhiteSpace(x.Error));
+        }
+        finally
+        {
+            Directory.Delete(link);
+            Directory.Delete(outside, true);
+        }
+    }
+
+    [Fact]
+    public async Task CleanAsync_keeps_completed_categories_when_a_later_resolution_fails()
+    {
+        var log = WriteFile(new byte[3], "Logs", "terminal.log");
+        var tick = WriteFile(new byte[5], "bases", "BrokerA", "ticks", "ticks.dat");
+        var history = WriteFile(new byte[7], "bases", "BrokerA", "history", "history.dat");
+        var categories = new HashSet<CleanupCategory>
+        {
+            CleanupCategory.Logs, CleanupCategory.Ticks, CleanupCategory.History
+        };
+
+        var result = await new TerminalCleanupService(new FailingResolver(CleanupCategory.Ticks))
+            .CleanAsync(Registration, categories, CancellationToken.None);
+
+        result.Select(x => x.Category).Should().Equal(
+            CleanupCategory.Logs, CleanupCategory.Ticks, CleanupCategory.History);
+        result.Single(x => x.Category == CleanupCategory.Logs).DeletedFiles.Should().Be(1);
+        var failed = result.Single(x => x.Category == CleanupCategory.Ticks);
+        failed.DeletedFiles.Should().Be(0);
+        failed.Failures.Should().ContainSingle(x => !string.IsNullOrWhiteSpace(x.Error));
+        result.Single(x => x.Category == CleanupCategory.History).DeletedFiles.Should().Be(1);
+
+        File.Exists(log).Should().BeFalse();
+        File.Exists(tick).Should().BeTrue();
+        File.Exists(history).Should().BeFalse();
+    }
+
+    private sealed class FailingResolver(CleanupCategory failing) : Application.Abstractions.ICleanupTargetResolver
+    {
+        private readonly CleanupTargetResolver _inner = new();
+
+        public IReadOnlyList<string> Resolve(TerminalRegistration terminal, CleanupCategory category) =>
+            category == failing
+                ? throw new InvalidOperationException("Cleanup path contains a reparse point.")
+                : _inner.Resolve(terminal, category);
+    }
+
+    private sealed class StubResolver(string root, params string[] relativeTargets) : Application.Abstractions.ICleanupTargetResolver
+    {
+        public IReadOnlyList<string> Resolve(TerminalRegistration terminal, CleanupCategory category) =>
+            category == CleanupCategory.Logs
+                ? relativeTargets.Select(target => Path.Combine(root, target)).ToArray()
+                : [];
     }
 
     [Fact]

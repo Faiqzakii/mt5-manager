@@ -28,10 +28,13 @@ public sealed class StandardLocationDiscoverySource(IEnumerable<string>? portabl
             catch (UnauthorizedAccessException) { continue; }
             catch (IOException) { continue; }
             foreach (var executable in executables)
+            {
+                var name = Path.GetFileName(Path.GetDirectoryName(executable));
                 result.Add(new TerminalRegistration(Guid.NewGuid(),
-                    Path.GetFileName(Path.GetDirectoryName(executable)) ?? "MetaTrader 5",
+                    string.IsNullOrWhiteSpace(name) ? "MetaTrader 5" : name,
                     executable, string.Empty, Path.GetDirectoryName(executable) ?? string.Empty,
                     [], DiscoverySource.StandardLocation, false));
+            }
 
             string[] children;
             try { children = Directory.GetDirectories(directory); }

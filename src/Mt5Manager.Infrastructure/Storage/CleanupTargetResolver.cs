@@ -16,6 +16,7 @@ public sealed class CleanupTargetResolver : ICleanupTargetResolver
         var root = Path.GetFullPath(terminal.DataDirectory);
         if (!string.Equals(root, TrimEndingSeparators(terminal.DataDirectory), StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("The terminal data directory must be a canonical path.");
+        RejectNonLocalRoot(root);
         if (!Directory.Exists(root))
             throw new InvalidOperationException("The verified terminal data directory does not exist.");
 
@@ -74,6 +75,29 @@ public sealed class CleanupTargetResolver : ICleanupTargetResolver
         {
             current = Path.Combine(current, segment);
             if (Directory.Exists(current) || File.Exists(current)) RejectReparsePoint(current);
+        }
+    }
+
+    private static void RejectNonLocalRoot(string root)
+    {
+        var pathRoot = Path.GetPathRoot(root);
+        if (string.IsNullOrEmpty(pathRoot))
+            throw new InvalidOperationException("The verified terminal data directory must be an absolute path.");
+        if (string.Equals(Path.TrimEndingDirectorySeparator(root), Path.TrimEndingDirectorySeparator(pathRoot),
+                StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Cleanup requires a data directory below a drive root, not the drive root itself.");
+        if (pathRoot.StartsWith(@"\\", StringComparison.Ordinal))
+            throw new InvalidOperationException($"Cleanup requires a local data directory: {root} is a network path.");
+        if (TryGetDriveType(pathRoot) == DriveType.Network)
+            throw new InvalidOperationException($"Cleanup requires a local data directory: {root} is on a network drive.");
+    }
+
+    private static DriveType? TryGetDriveType(string pathRoot)
+    {
+        try { return new DriveInfo(pathRoot).DriveType; }
+        catch (Exception exception) when (exception is IOException or ArgumentException or UnauthorizedAccessException)
+        {
+            return null;
         }
     }
 

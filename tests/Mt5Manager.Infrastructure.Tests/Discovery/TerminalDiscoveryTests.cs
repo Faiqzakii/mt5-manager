@@ -202,6 +202,18 @@ public sealed class TerminalDiscoveryTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Discover_names_a_terminal_whose_executable_sits_at_a_drive_root()
+    {
+        var source = new ProcessDiscoverySource(new StubEnumerator(
+            new RunningTerminal(@"C:\terminal64.exe", @"C:\terminal64.exe")));
+
+        var found = await source.DiscoverAsync();
+
+        var terminal = found.Should().ContainSingle().Subject;
+        terminal.DisplayName.Should().Be("MetaTrader 5");
+    }
+
     private static TerminalRegistration Candidate(DiscoverySource source, string executable, string data, string name) =>
         new(Guid.NewGuid(), name, executable, data, Path.GetDirectoryName(executable)!, [], source, data.Length > 0);
 
@@ -293,6 +305,11 @@ public sealed class TerminalDiscoveryTests : IDisposable
     {
         public Task<IReadOnlyList<TerminalRegistration>> DiscoverAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<TerminalRegistration>>(candidates);
+    }
+
+    private sealed class StubEnumerator(params RunningTerminal[] terminals) : IRunningTerminalEnumerator
+    {
+        public IEnumerable<RunningTerminal> Enumerate() => terminals;
     }
 
     private static FileSystemAccessRule DenyListing(string directory)

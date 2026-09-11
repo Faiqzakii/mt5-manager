@@ -54,6 +54,22 @@ public abstract class StorageTestBase : IDisposable
         return link;
     }
 
+    protected static string CurrentUserIdentity() =>
+        System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value;
+
+    protected static void SetDirectoryDeny(string path, string identity, bool deny)
+    {
+        using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "icacls.exe",
+            ArgumentList = { path, deny ? "/deny" : "/remove:d", deny ? $"*{identity}:(OI)(CI)F" : $"*{identity}" },
+            UseShellExecute = false,
+            CreateNoWindow = true
+        }) ?? throw new InvalidOperationException("Could not start icacls.");
+        process.WaitForExit();
+        if (process.ExitCode != 0) throw new InvalidOperationException("Could not update test directory ACL.");
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(Root)) Directory.Delete(Root, true);

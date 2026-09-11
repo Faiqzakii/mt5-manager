@@ -39,6 +39,7 @@ public sealed class JsonLinesAuditLogger : IAuditLogger, IDisposable
                 4096, FileOptions.Asynchronous);
             await stream.WriteAsync(line, cancellationToken);
             await stream.FlushAsync(cancellationToken);
+            stream.Flush(flushToDisk: true);
         }
         finally
         {

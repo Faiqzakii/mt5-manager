@@ -44,4 +44,29 @@ public sealed class TerminalStorageInspectorTests : StorageTestBase
             Directory.Delete(outside, true);
         }
     }
+
+    [Fact]
+    public async Task InspectAsync_skips_unreadable_entries_and_still_reports_every_category()
+    {
+        var denied = CreateDirectory("Logs", "denied");
+        WriteFile(new byte[7], "Logs", "denied", "blocked.log");
+        WriteFile(new byte[2], "Logs", "kept.log");
+        WriteFile(new byte[5], "bases", "BrokerA", "ticks", "ticks.dat");
+        var identity = CurrentUserIdentity();
+        SetDirectoryDeny(denied, identity, deny: true);
+
+        try
+        {
+            var result = await new TerminalStorageInspector(new CleanupTargetResolver())
+                .InspectAsync(Registration, CancellationToken.None);
+
+            result.Single(x => x.Category == CleanupCategory.Logs).Should().Be(new CategoryUsage(CleanupCategory.Logs, 1, 2));
+            result.Single(x => x.Category == CleanupCategory.Ticks).Should().Be(new CategoryUsage(CleanupCategory.Ticks, 1, 5));
+            result.Single(x => x.Category == CleanupCategory.History).Should().Be(new CategoryUsage(CleanupCategory.History, 0, 0));
+        }
+        finally
+        {
+            SetDirectoryDeny(denied, identity, deny: false);
+        }
+    }
 }

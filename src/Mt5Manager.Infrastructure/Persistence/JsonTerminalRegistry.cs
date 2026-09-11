@@ -36,7 +36,10 @@ public sealed class JsonTerminalRegistry : ITerminalRegistry
                 documentVersion != CurrentVersion ||
                 !root.TryGetProperty("terminals", out var terminals) ||
                 terminals.ValueKind != JsonValueKind.Array)
+            {
+                PreserveUnreadableFile();
                 return [];
+            }
 
             var valid = new List<TerminalRegistration>();
             foreach (var element in terminals.EnumerateArray())
@@ -55,7 +58,22 @@ public sealed class JsonTerminalRegistry : ITerminalRegistry
         }
         catch (JsonException)
         {
+            PreserveUnreadableFile();
             return [];
+        }
+    }
+
+    // The file exists but cannot be understood: keep it as evidence instead of letting the next save overwrite it.
+    private void PreserveUnreadableFile()
+    {
+        try
+        {
+            var backup = $"{_path}.corrupt-{DateTime.UtcNow:yyyyMMddHHmmss}";
+            if (!File.Exists(backup)) File.Move(_path, backup);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // The registry still reports empty; the damaged file simply stays where it is.
         }
     }
 

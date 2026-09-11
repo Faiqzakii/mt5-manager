@@ -71,6 +71,18 @@ public sealed class JsonTerminalRegistryTests : IDisposable
     }
 
     [Fact]
+    public async Task Load_keeps_a_damaged_registry_file_instead_of_leaving_it_to_be_overwritten()
+    {
+        await File.WriteAllTextAsync(RegistryPath, "{ this is not the registry");
+
+        var loaded = await new JsonTerminalRegistry(RegistryPath).LoadAsync();
+
+        loaded.Should().BeEmpty();
+        var backup = Directory.EnumerateFiles(_root, "*.corrupt-*").Should().ContainSingle().Subject;
+        (await File.ReadAllTextAsync(backup)).Should().Be("{ this is not the registry");
+    }
+
+    [Fact]
     public async Task Load_returns_empty_for_non_numeric_version()
     {
         await File.WriteAllTextAsync(RegistryPath, """

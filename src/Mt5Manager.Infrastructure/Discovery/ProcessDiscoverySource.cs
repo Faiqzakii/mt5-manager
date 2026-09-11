@@ -27,8 +27,9 @@ public sealed class ProcessDiscoverySource(IRunningTerminalEnumerator? enumerato
             var arguments = WindowsProcessQuery.Split(process.CommandLine);
             if (arguments.Count > 0) arguments.RemoveAt(0);
             var data = WindowsProcessQuery.FindDataDirectory(arguments);
+            var name = Path.GetFileName(Path.GetDirectoryName(process.ExecutablePath));
             result.Add(new TerminalRegistration(Guid.NewGuid(),
-                Path.GetFileName(Path.GetDirectoryName(process.ExecutablePath)) ?? "MetaTrader 5",
+                string.IsNullOrWhiteSpace(name) ? "MetaTrader 5" : name,
                 process.ExecutablePath, data ?? string.Empty,
                 Path.GetDirectoryName(process.ExecutablePath) ?? string.Empty,
                 arguments, DiscoverySource.Process, data is not null && Directory.Exists(data)));

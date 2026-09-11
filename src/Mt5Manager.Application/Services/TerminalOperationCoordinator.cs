@@ -119,6 +119,9 @@ public sealed class TerminalOperationCoordinator
                     return await RejectAndAuditAsync(preparation, "The terminal is no longer registered.");
                 if (!terminal.DataDirectoryVerified)
                     return await RejectAndAuditAsync(preparation, "Cleanup requires a verified terminal data directory.");
+                if (!MatchesSnapshot(terminal, preparation.TerminalSnapshot))
+                    return await RejectAndAuditAsync(preparation,
+                        "The terminal registration changed after the cleanup preview, so no files were deleted.");
                 return await CompleteAsync(terminal, preparation, forceApproved, cancellationToken);
             }
             finally
@@ -133,9 +136,25 @@ public sealed class TerminalOperationCoordinator
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(preparation);
-        var gate = GateFor(preparation.Request.TerminalId);
+        var terminalId = preparation.Request.TerminalId;
+        var gate = GateFor(terminalId);
         await gate.WaitAsync(cancellationToken);
-        try { Consume(preparation); }
+        try
+        {
+            // The dialog is abandoning this terminal: drop the preparation it handed over and any
+            // preparation this coordinator still holds for the same terminal, so a cancelled
+            // preparation can never leak the per-terminal reservation.
+            Discard(preparation.ReservationToken);
+            if (_reservations.TryGetValue(terminalId, out var reservedToken))
+            {
+                if (_issuedActive.TryGetValue(reservedToken, out var reserved)) Consume(reserved);
+                else
+                {
+                    Discard(reservedToken);
+                    _reservations.TryRemove(new KeyValuePair<Guid, Guid>(terminalId, reservedToken));
+                }
+            }
+        }
         finally { gate.Release(); }
     }
 
@@ -143,15 +162,33 @@ public sealed class TerminalOperationCoordinator
         bool forceApproved, CancellationToken cancellationToken)
     {
         var request = preparation.Request;
-        var shutdown = preparation.WasRunning ? ShutdownMethod.Graceful : ShutdownMethod.None;
+        var wasRunning = preparation.WasRunning;
+        var shutdown = wasRunning ? ShutdownMethod.Graceful : ShutdownMethod.None;
         if (preparation.Status == CleanupPreparationStatus.RequiresForceConfirmation)
         {
-            if (!forceApproved) return await DeclineAsync(terminal, request, preparation.WasRunning);
+            if (!forceApproved) return await DeclineAsync(terminal, request, wasRunning);
             var stop = await _processController.StopAsync(terminal, _stopTimeout, true, cancellationToken);
             if (stop.Outcome is not (StopOutcome.ForceTerminated or StopOutcome.ExitedGracefully or StopOutcome.AlreadyStopped))
-                return await FailAsync(terminal, request, preparation.WasRunning, ShutdownMethod.Force,
+                return await FailAsync(terminal, request, wasRunning, ShutdownMethod.Force,
                     stop.Error ?? "The terminal could not be force terminated.");
             shutdown = ShutdownMethod.Force;
+        }
+        else
+        {
+            // The preparation can be minutes old: never delete the data of a terminal that is running again.
+            var state = await _processController.GetStateAsync(terminal, cancellationToken);
+            if (state.State == TerminalState.Error)
+                return await FailAsync(terminal, request, wasRunning, ShutdownMethod.None,
+                    state.Error ?? "The terminal state could not be determined, so no files were deleted.");
+            if (state.State != TerminalState.Stopped)
+            {
+                var stop = await _processController.StopAsync(terminal, _stopTimeout, false, cancellationToken);
+                if (stop.Outcome is not (StopOutcome.ExitedGracefully or StopOutcome.AlreadyStopped))
+                    return await FailAsync(terminal, request, true, ShutdownMethod.Graceful,
+                        stop.Error ?? "The terminal is running again and could not be stopped, so no files were deleted.");
+                wasRunning = true;
+                shutdown = ShutdownMethod.Graceful;
+            }
         }
 
         IReadOnlyList<CleanupCategoryResult> results = [];
@@ -164,24 +201,24 @@ public sealed class TerminalOperationCoordinator
 
         var restarted = false;
         string? restartError = null;
-        if (preparation.WasRunning)
+        if (wasRunning)
         {
             try { await _processController.StartAsync(terminal, CancellationToken.None); restarted = true; }
             catch (Exception exception) { restartError = exception.Message; }
         }
 
         var auditOutcome = cleanupError is null ? AuditOutcome.Completed : AuditOutcome.Rejected;
-        await AppendAuditAsync(terminal, request, preparation.WasRunning, shutdown, auditOutcome, cleanupError,
+        var auditError = await TryAppendAuditAsync(terminal, request, wasRunning, shutdown, auditOutcome, cleanupError,
             results, restarted, restartError);
-        var result = new CleanupResult(preparation.WasRunning, restarted, results, restartError);
-        return cleanupError is null
-            ? new CleanupOutcome(CleanupOutcomeStatus.Completed, result, null)
-            : new CleanupOutcome(CleanupOutcomeStatus.Rejected, result, cleanupError);
+        var result = new CleanupResult(wasRunning, restarted, results, restartError);
+        return cleanupError is not null
+            ? new CleanupOutcome(CleanupOutcomeStatus.Rejected, result, cleanupError)
+            : new CleanupOutcome(CleanupOutcomeStatus.Completed, result, auditError);
     }
 
     private async Task<CleanupOutcome> RejectAndAuditAsync(CleanupPreparation preparation, string message)
     {
-        await AppendAuditAsync(preparation.TerminalSnapshot, preparation.Request, preparation.WasRunning,
+        await TryAppendAuditAsync(preparation.TerminalSnapshot, preparation.Request, preparation.WasRunning,
             ShutdownMethod.None, AuditOutcome.Rejected, message, [], false, null);
         return new CleanupOutcome(CleanupOutcomeStatus.Rejected, EmptyResult(preparation.WasRunning), message);
     }
@@ -189,7 +226,7 @@ public sealed class TerminalOperationCoordinator
     private async Task<CleanupOutcome> DeclineAsync(TerminalRegistration terminal, CleanupRequest request, bool wasRunning)
     {
         const string message = "The terminal did not close within the timeout and force termination was declined, so no files were deleted.";
-        await AppendAuditAsync(terminal, request, wasRunning, ShutdownMethod.Graceful, AuditOutcome.ForceDeclined,
+        await TryAppendAuditAsync(terminal, request, wasRunning, ShutdownMethod.Graceful, AuditOutcome.ForceDeclined,
             message, [], false, null);
         return new CleanupOutcome(CleanupOutcomeStatus.ForceDeclined, EmptyResult(wasRunning), message);
     }
@@ -197,19 +234,45 @@ public sealed class TerminalOperationCoordinator
     private async Task<CleanupOutcome> FailAsync(TerminalRegistration terminal, CleanupRequest request,
         bool wasRunning, ShutdownMethod shutdownMethod, string message)
     {
-        await AppendAuditAsync(terminal, request, wasRunning, shutdownMethod, AuditOutcome.Rejected,
+        await TryAppendAuditAsync(terminal, request, wasRunning, shutdownMethod, AuditOutcome.Rejected,
             message, [], false, null);
         return new CleanupOutcome(CleanupOutcomeStatus.Rejected, EmptyResult(wasRunning), message);
     }
 
-    private Task AppendAuditAsync(TerminalRegistration terminal, CleanupRequest request, bool wasRunning,
+    private async Task<string?> TryAppendAuditAsync(TerminalRegistration terminal, CleanupRequest request, bool wasRunning,
         ShutdownMethod shutdownMethod, AuditOutcome outcome, string? message,
-        IReadOnlyList<CleanupCategoryResult> results, bool restarted, string? restartError) =>
-        _auditLogger.AppendAsync(new AuditRecord(DateTimeOffset.UtcNow, terminal.Id, terminal.DisplayName,
-            CleanupOperation, request.Categories.OrderBy(category => category).ToArray(), wasRunning,
-            shutdownMethod, outcome, message,
-            results.Select(result => new AuditCategoryOutcome(result.Category, result.DeletedFiles,
-                result.DeletedBytes, result.Failures)).ToArray(), restarted, restartError));
+        IReadOnlyList<CleanupCategoryResult> results, bool restarted, string? restartError)
+    {
+        try
+        {
+            await _auditLogger.AppendAsync(new AuditRecord(DateTimeOffset.UtcNow, terminal.Id, terminal.DisplayName,
+                CleanupOperation, request.Categories.OrderBy(category => category).ToArray(), wasRunning,
+                shutdownMethod, outcome, message,
+                results.Select(result => new AuditCategoryOutcome(result.Category, result.DeletedFiles,
+                    result.DeletedBytes, result.Failures)).ToArray(), restarted, restartError));
+            return null;
+        }
+        catch (Exception exception)
+        {
+            // A completed cleanup must never be reported as failed just because its audit line
+            // could not be written; the error travels with the outcome instead.
+            return $"The audit log could not be written: {exception.Message}";
+        }
+    }
+
+    private static bool MatchesSnapshot(TerminalRegistration terminal, TerminalRegistration snapshot) =>
+        string.Equals(Path.TrimEndingDirectorySeparator(terminal.ExecutablePath),
+            Path.TrimEndingDirectorySeparator(snapshot.ExecutablePath), StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(Path.TrimEndingDirectorySeparator(terminal.DataDirectory),
+            Path.TrimEndingDirectorySeparator(snapshot.DataDirectory), StringComparison.OrdinalIgnoreCase);
+
+    private void Discard(Guid reservationToken)
+    {
+        if (_issuedActive.TryGetValue(reservationToken, out var active))
+            _issuedActive.TryRemove(new KeyValuePair<Guid, CleanupPreparation>(reservationToken, active));
+        if (_issuedRejections.TryGetValue(reservationToken, out var rejected))
+            _issuedRejections.TryRemove(new KeyValuePair<Guid, CleanupPreparation>(reservationToken, rejected));
+    }
 
     private bool Consume(CleanupPreparation preparation)
     {
