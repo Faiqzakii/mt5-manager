@@ -6,17 +6,18 @@ namespace Mt5Manager.Infrastructure.Discovery;
 
 public sealed class TerminalDiscovery(
     IEnumerable<ITerminalDiscoverySource> sources,
-    ITerminalRegistry? registry = null) : ITerminalDiscovery
+    ITerminalRegistry? registry = null,
+    IMt5DataDirectoryResolver? dataDirectoryResolver = null) : ITerminalDiscovery
 {
     public async Task<IReadOnlyList<TerminalRegistration>> DiscoverAsync(CancellationToken cancellationToken = default)
     {
         var discovered = new Dictionary<TerminalIdentity, TerminalRegistration>();
         if (registry is not null)
             foreach (var registration in await registry.LoadAsync(cancellationToken))
-                Merge(discovered, registration);
+                Merge(discovered, Enrich(registration));
         foreach (var source in sources)
             foreach (var candidate in await source.DiscoverAsync(cancellationToken))
-                Merge(discovered, candidate);
+                Merge(discovered, Enrich(candidate));
 
         var result = discovered.Values
             .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
@@ -24,6 +25,15 @@ public sealed class TerminalDiscovery(
             .ToArray();
         if (registry is not null) await registry.SaveAsync(result, cancellationToken);
         return result;
+    }
+
+    private TerminalRegistration Enrich(TerminalRegistration candidate)
+    {
+        if (candidate.DataDirectoryVerified || dataDirectoryResolver is null) return candidate;
+        var resolved = dataDirectoryResolver.Resolve(candidate);
+        return resolved is null
+            ? candidate
+            : candidate with { DataDirectory = resolved, DataDirectoryVerified = true };
     }
 
     private static void Merge(

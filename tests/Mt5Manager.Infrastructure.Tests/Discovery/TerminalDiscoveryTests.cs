@@ -104,6 +104,24 @@ public sealed class TerminalDiscoveryTests : IDisposable
     }
 
     [Fact]
+    public async Task Discover_enriches_an_unverified_terminal_before_deduplication_and_persistence()
+    {
+        var registry = new JsonTerminalRegistry(Path.Combine(_root, "terminals.json"));
+        var executable = Path.Combine(_root, "Broker", "terminal64.exe");
+        var candidate = Candidate(DiscoverySource.StandardLocation, executable, string.Empty, "Broker");
+        var resolvedData = Directory.CreateDirectory(Path.Combine(_root, "ResolvedData")).FullName;
+        var resolver = new RecordingDataDirectoryResolver(resolvedData);
+
+        var result = await new TerminalDiscovery([new StubSource(candidate, candidate)], registry, resolver).DiscoverAsync();
+
+        result.Should().ContainSingle();
+        result[0].DataDirectory.Should().Be(resolvedData);
+        result[0].DataDirectoryVerified.Should().BeTrue();
+        resolver.Calls.Should().Be(2);
+        (await registry.LoadAsync()).Should().ContainSingle().Which.DataDirectory.Should().Be(resolvedData);
+    }
+
+    [Fact]
     public async Task Discover_standard_locations_survives_inaccessible_subdirectory()
     {
         var portableRoot = Path.Combine(_root, "Portable");
@@ -305,6 +323,12 @@ public sealed class TerminalDiscoveryTests : IDisposable
     {
         public Task<IReadOnlyList<TerminalRegistration>> DiscoverAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<TerminalRegistration>>(candidates);
+    }
+
+    private sealed class RecordingDataDirectoryResolver(string result) : IMt5DataDirectoryResolver
+    {
+        public int Calls { get; private set; }
+        public string? Resolve(TerminalRegistration terminal) { Calls++; return result; }
     }
 
     private sealed class StubEnumerator(params RunningTerminal[] terminals) : IRunningTerminalEnumerator
