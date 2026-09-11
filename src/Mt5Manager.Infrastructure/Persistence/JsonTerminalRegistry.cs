@@ -28,9 +28,13 @@ public sealed class JsonTerminalRegistry : ITerminalRegistry
         {
             await using var stream = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.Read);
             using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
-            if (!document.RootElement.TryGetProperty("version", out var version) ||
-                version.GetInt32() != CurrentVersion ||
-                !document.RootElement.TryGetProperty("terminals", out var terminals) ||
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object ||
+                !root.TryGetProperty("version", out var version) ||
+                version.ValueKind != JsonValueKind.Number ||
+                !version.TryGetInt32(out var documentVersion) ||
+                documentVersion != CurrentVersion ||
+                !root.TryGetProperty("terminals", out var terminals) ||
                 terminals.ValueKind != JsonValueKind.Array)
                 return [];
 
@@ -82,7 +86,7 @@ public sealed class JsonTerminalRegistry : ITerminalRegistry
         }
     }
 
-    private static bool IsValid(TerminalRegistration? registration) => registration is not null &&
+    internal static bool IsValid(TerminalRegistration? registration) => registration is not null &&
         registration.Id != Guid.Empty &&
         !string.IsNullOrWhiteSpace(registration.DisplayName) &&
         !string.IsNullOrWhiteSpace(registration.ExecutablePath) &&

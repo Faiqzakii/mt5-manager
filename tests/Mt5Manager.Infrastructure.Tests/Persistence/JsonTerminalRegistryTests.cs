@@ -60,6 +60,28 @@ public sealed class JsonTerminalRegistryTests : IDisposable
         loaded[0].Arguments.Should().Equal("/portable");
     }
 
+    [Fact]
+    public async Task Load_returns_empty_for_non_object_json_root()
+    {
+        await File.WriteAllTextAsync(RegistryPath, "[1,2,3]");
+
+        var loaded = await new JsonTerminalRegistry(RegistryPath).LoadAsync();
+
+        loaded.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Load_returns_empty_for_non_numeric_version()
+    {
+        await File.WriteAllTextAsync(RegistryPath, """
+            { "version": "one", "terminals": [] }
+            """);
+
+        var loaded = await new JsonTerminalRegistry(RegistryPath).LoadAsync();
+
+        loaded.Should().BeEmpty();
+    }
+
     private static TerminalRegistration Registration(string name, string executable, string data) =>
         new(Guid.NewGuid(), name, executable, data, Path.GetDirectoryName(executable)!, [], DiscoverySource.Manual, true);
 

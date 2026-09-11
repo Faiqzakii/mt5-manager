@@ -1,5 +1,6 @@
 using Mt5Manager.Application.Abstractions;
 using Mt5Manager.Domain.Models;
+using Mt5Manager.Infrastructure.Persistence;
 
 namespace Mt5Manager.Infrastructure.Discovery;
 
@@ -10,16 +11,12 @@ public sealed class TerminalDiscovery(
     public async Task<IReadOnlyList<TerminalRegistration>> DiscoverAsync(CancellationToken cancellationToken = default)
     {
         var discovered = new Dictionary<TerminalIdentity, TerminalRegistration>();
+        if (registry is not null)
+            foreach (var registration in await registry.LoadAsync(cancellationToken))
+                Merge(discovered, registration);
         foreach (var source in sources)
-        {
             foreach (var candidate in await source.DiscoverAsync(cancellationToken))
-            {
-                var normalized = Normalize(candidate);
-                var key = new TerminalIdentity(normalized.ExecutablePath, normalized.DataDirectory);
-                if (!discovered.TryGetValue(key, out var existing) || Priority(normalized.Source) > Priority(existing.Source))
-                    discovered[key] = normalized;
-            }
-        }
+                Merge(discovered, candidate);
 
         var result = discovered.Values
             .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
@@ -27,6 +24,17 @@ public sealed class TerminalDiscovery(
             .ToArray();
         if (registry is not null) await registry.SaveAsync(result, cancellationToken);
         return result;
+    }
+
+    private static void Merge(
+        Dictionary<TerminalIdentity, TerminalRegistration> discovered,
+        TerminalRegistration candidate)
+    {
+        var normalized = Normalize(candidate);
+        if (!JsonTerminalRegistry.IsValid(normalized)) return;
+        var key = new TerminalIdentity(normalized.ExecutablePath, normalized.DataDirectory);
+        if (!discovered.TryGetValue(key, out var existing) || Priority(normalized.Source) > Priority(existing.Source))
+            discovered[key] = normalized;
     }
 
     private static TerminalRegistration Normalize(TerminalRegistration candidate)

@@ -22,20 +22,46 @@ public sealed class ShortcutDiscoverySource(
     {
         var result = new List<TerminalRegistration>();
         foreach (var root in _roots.Where(Directory.Exists))
-        foreach (var shortcut in Directory.EnumerateFiles(root, "*.lnk", SearchOption.AllDirectories))
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            ShortcutTarget? target;
-            try { target = _resolver.Resolve(shortcut); } catch (COMException) { continue; }
-            if (target is null || !Path.GetFileName(target.TargetPath).Equals("terminal64.exe", StringComparison.OrdinalIgnoreCase)) continue;
-            var arguments = WindowsCommandLine.Split($"terminal64.exe {target.Arguments}");
-            if (arguments.Count > 0) arguments.RemoveAt(0);
-            result.Add(new TerminalRegistration(Guid.NewGuid(), Path.GetFileNameWithoutExtension(shortcut),
-                target.TargetPath, string.Empty,
-                string.IsNullOrWhiteSpace(target.WorkingDirectory) ? Path.GetDirectoryName(target.TargetPath) ?? string.Empty : target.WorkingDirectory,
-                arguments, DiscoverySource.Shortcut, false));
+            var pending = new Queue<string>();
+            pending.Enqueue(root);
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (pending.Count > 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var directory = pending.Dequeue();
+                if (!visited.Add(directory)) continue;
+
+                // Enumerate one directory at a time: an inaccessible subdirectory must not abort the scan.
+                string[] shortcuts;
+                try { shortcuts = Directory.GetFiles(directory, "*.lnk"); }
+                catch (UnauthorizedAccessException) { continue; }
+                catch (IOException) { continue; }
+                foreach (var shortcut in shortcuts) Add(shortcut, result);
+
+                string[] children;
+                try { children = Directory.GetDirectories(directory); }
+                catch (UnauthorizedAccessException) { continue; }
+                catch (IOException) { continue; }
+                foreach (var child in children) pending.Enqueue(child);
+            }
         }
         return Task.FromResult<IReadOnlyList<TerminalRegistration>>(result);
+    }
+
+    private void Add(string shortcut, List<TerminalRegistration> result)
+    {
+        ShortcutTarget? target;
+        try { target = _resolver.Resolve(shortcut); }
+        catch (COMException) { return; }
+        if (target is null || !Path.GetFileName(target.TargetPath).Equals("terminal64.exe", StringComparison.OrdinalIgnoreCase))
+            return;
+        var arguments = WindowsCommandLine.Split($"terminal64.exe {target.Arguments}");
+        if (arguments.Count > 0) arguments.RemoveAt(0);
+        result.Add(new TerminalRegistration(Guid.NewGuid(), Path.GetFileNameWithoutExtension(shortcut),
+            target.TargetPath, string.Empty,
+            string.IsNullOrWhiteSpace(target.WorkingDirectory) ? Path.GetDirectoryName(target.TargetPath) ?? string.Empty : target.WorkingDirectory,
+            arguments, DiscoverySource.Shortcut, false));
     }
 
     private static string[] DefaultRoots() =>
