@@ -51,8 +51,8 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
                 process.Dispose();
                 throw new InvalidOperationException($"Terminal '{terminal.DisplayName}' is already running.");
             }
-            process.EnableRaisingEvents = true;
             process.Exited += (_, _) => _ = RemoveExitedAsync(terminal.Id, tracked);
+            process.EnableRaisingEvents = true;
             return process.Id;
         }
         finally { _gate.Release(); }

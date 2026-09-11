@@ -11,6 +11,7 @@ File.WriteAllText(outputPath, JsonSerializer.Serialize(new
     WorkingDirectory = Environment.CurrentDirectory,
     ProcessId = Environment.ProcessId
 }));
+if (string.Equals(closeBehavior, "exit-now", StringComparison.Ordinal)) return;
 Application.SetHighDpiMode(HighDpiMode.SystemAware);
 Application.EnableVisualStyles();
 using var form = new Form { Text = $"ExitOnClose-{Environment.ProcessId}", Width = 100, Height = 100, ShowInTaskbar = true };

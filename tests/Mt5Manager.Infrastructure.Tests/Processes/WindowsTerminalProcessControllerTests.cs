@@ -62,6 +62,22 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Immediate_exit_releases_tracked_process()
+    {
+        for (var attempt = 0; attempt < 200; attempt++)
+        {
+            var terminal = Registration(_root, Path.Combine(_root, $"immediate-{attempt}.json"), "exit-now");
+            var pid = await _controller.StartAsync(terminal, CancellationToken.None);
+            try { Track(pid); } catch (ArgumentException) { }
+        }
+
+        var processesField = typeof(WindowsTerminalProcessController).GetField("_processes", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var processes = (System.Collections.IDictionary)processesField.GetValue(_controller)!;
+        await WaitUntilAsync(() => processes.Count == 0);
+        processes.Count.Should().Be(0);
+    }
+
+    [Fact]
     public async Task Stop_returns_graceful_exit_when_process_accepts_close()
     {
         var terminal = Registration(_root, Path.Combine(_root, "graceful.json"), "exit");
