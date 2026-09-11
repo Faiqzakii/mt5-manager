@@ -278,6 +278,26 @@ public sealed class TerminalOperationCoordinatorTests
         cleanup.Requests.Should().BeEmpty();
         audit.Records.Should().ContainSingle().Which.Outcome.Should().Be(AuditOutcome.Rejected);
         audit.Records[0].TerminalId.Should().Be(terminalId);
+        outcome.Message.Should().Be(preparation.Message);
+        audit.Records[0].Message.Should().Be(preparation.Message);
+    }
+
+    [Fact]
+    public async Task Unknown_terminal_rejection_preserves_reason_in_audit()
+    {
+        var controller = new FakeProcessController();
+        var cleanup = new FakeCleanupService();
+        var audit = new RecordingAuditLogger();
+        var coordinator = Coordinator(new FakeRegistry(Registration(Guid.NewGuid())), controller, cleanup, audit);
+
+        var preparation = await coordinator.PrepareCleanupAsync(Request(Guid.NewGuid(), CleanupCategory.Logs));
+        var outcome = await coordinator.ContinueCleanupAsync(preparation, forceApproved: true);
+
+        preparation.Status.Should().Be(CleanupPreparationStatus.Rejected);
+        outcome.Message.Should().Be(preparation.Message);
+        controller.StateCalls.Should().Be(0);
+        cleanup.Requests.Should().BeEmpty();
+        audit.Records.Should().ContainSingle().Which.Message.Should().Be(preparation.Message);
     }
 
     [Fact]

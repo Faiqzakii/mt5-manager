@@ -98,6 +98,10 @@ public sealed class TerminalOperationCoordinator
         await gate.WaitAsync(cancellationToken);
         try
         {
+            if (preparation.Status == CleanupPreparationStatus.Rejected &&
+                preparation.ReservationToken == Guid.Empty)
+                return await RejectAndAuditAsync(preparation,
+                    preparation.Message ?? "The cleanup was rejected.");
             if (!Consume(preparation))
                 return await RejectAndAuditAsync(preparation, "This cleanup preparation is no longer active.");
 
