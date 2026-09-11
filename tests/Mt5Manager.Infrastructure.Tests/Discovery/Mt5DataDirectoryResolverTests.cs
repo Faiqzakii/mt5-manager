@@ -54,6 +54,27 @@ public sealed class Mt5DataDirectoryResolverTests : IDisposable
     }
 
     [Fact]
+    public void Resolve_explicit_datadir_wins_over_conflicting_origin_metadata()
+    {
+        Candidate("A1", installation);
+        var explicitData = Directory.CreateDirectory(Path.Combine(root, "Explicit Data")).FullName;
+        CreateStructure(explicitData);
+        var terminal = Terminal([$"/datadir:{explicitData}"]);
+
+        new Mt5DataDirectoryResolver(appData).Resolve(terminal).Should().Be(explicitData);
+    }
+
+    [Fact]
+    public void Resolve_invalid_explicit_datadir_does_not_fall_back_to_origin()
+    {
+        Candidate("A1", installation);
+        var invalid = Directory.CreateDirectory(Path.Combine(root, "Invalid Explicit Data")).FullName;
+        var terminal = Terminal([$"/datadir:{invalid}"]);
+
+        new Mt5DataDirectoryResolver(appData).Resolve(terminal).Should().BeNull();
+    }
+
+    [Fact]
     public void Resolve_rejects_matching_origin_without_mt5_data_structure()
     {
         var candidate = Directory.CreateDirectory(Path.Combine(appData, "A1")).FullName;

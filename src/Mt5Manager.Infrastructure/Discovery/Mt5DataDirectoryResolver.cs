@@ -22,6 +22,12 @@ public sealed class Mt5DataDirectoryResolver : IMt5DataDirectoryResolver
         ArgumentNullException.ThrowIfNull(terminal);
         if (terminal.DataDirectoryVerified && IsSafeStructuredDirectory(terminal.DataDirectory))
             return Canonicalize(terminal.DataDirectory);
+        var explicitDataDirectory = WindowsProcessQuery.FindDataDirectory(terminal.Arguments);
+        if (explicitDataDirectory is not null)
+            return IsSafeStructuredDirectory(explicitDataDirectory)
+                ? Canonicalize(explicitDataDirectory)
+                : null;
+
 
         var matches = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var executableDirectory = Path.GetDirectoryName(Canonicalize(terminal.ExecutablePath));

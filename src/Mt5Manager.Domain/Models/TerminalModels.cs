@@ -4,6 +4,26 @@ public enum TerminalState { Stopped, Running, Busy, Error }
 public enum CleanupCategory { Logs, Ticks, History }
 public enum DiscoverySource { Process, Shortcut, StandardLocation, Manual }
 
+public enum AccountTradeMode { Demo, Contest, Real }
+public enum AlgoTradingState { Enabled, Disabled, Unknown }
+
+public sealed record TerminalAccountSnapshot(
+    int ProtocolVersion,
+    DateTimeOffset Timestamp,
+    string DataPath,
+    long Login,
+    string AccountName,
+    string Server,
+    string Company,
+    AccountTradeMode TradeMode,
+    bool Connected,
+    AlgoTradingState GlobalAlgoTrading,
+    bool EaTradingAllowed,
+    bool AccountTradingAllowed,
+    bool AccountExpertAllowed);
+
+public sealed record AlgoTradingControlResult(bool Success, string Message, TerminalAccountSnapshot? Snapshot);
+
 public sealed record TerminalRegistration(
     Guid Id,
     string DisplayName,

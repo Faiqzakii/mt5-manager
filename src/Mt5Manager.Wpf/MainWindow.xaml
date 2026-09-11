@@ -81,7 +81,7 @@
                 <DataTemplate>
                     <Border Style="{StaticResource CardStyle}">
                         <Grid>
-                            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
 
                             <Grid>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -121,6 +121,25 @@
 
                             <Grid Grid.Row="2" Margin="0,14,0,0">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <Border Style="{StaticResource SubtlePanelStyle}" Margin="0,0,12,0">
+                                    <StackPanel>
+                                        <TextBlock Text="ACTIVE ACCOUNT" Style="{StaticResource CaptionStyle}" FontWeight="Bold"/>
+                                        <TextBlock Text="{Binding AccountSummary}" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,5,0,0"/>
+                                        <TextBlock Text="{Binding AlgoSummary}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                                        <TextBlock Text="Install Mt5ManagerBridge.mq5 in each terminal to expose account and Algo Trading state." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center" MinWidth="220">
+                                    <TextBlock Text="GLOBAL ALGO TRADING" Style="{StaticResource CaptionStyle}" FontWeight="Bold"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                        <Button Content="Enable Algo" Command="{Binding EnableAlgoCommand}" Style="{StaticResource PrimaryButtonStyle}" MinWidth="102"/>
+                                        <Button Content="Disable Algo" Command="{Binding DisableAlgoCommand}" Style="{StaticResource DangerOutlineButtonStyle}" MinWidth="102" Margin="10,0,0,0"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Grid>
+
+                            <Grid Grid.Row="3" Margin="0,14,0,0">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                 <StackPanel>
                                     <TextBlock Text="{Binding StorageSummary}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap"/>
                                     <TextBlock Text="{Binding LastResult}" Foreground="{StaticResource TextMutedBrush}" FontSize="12" Margin="0,5,0,0" TextWrapping="Wrap"/>
@@ -129,7 +148,7 @@
                                         Style="{StaticResource DangerOutlineButtonStyle}" MinWidth="126" Margin="18,0,0,0"/>
                             </Grid>
 
-                            <Border Grid.Row="3" Margin="0,14,0,0">
+                            <Border Grid.Row="4" Margin="0,14,0,0">
                                 <Border.Style><Style TargetType="Border" BasedOn="{StaticResource ErrorPanelStyle}">
                                     <Style.Triggers><DataTrigger Binding="{Binding Error}" Value="{x:Null}"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers>
                                 </Style></Border.Style>

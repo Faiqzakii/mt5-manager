@@ -10,6 +10,12 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.12" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="..\Mt5Manager.Mql5\Experts\Mt5ManagerBridge.mq5" Link="Mt5ManagerBridge.mq5">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>

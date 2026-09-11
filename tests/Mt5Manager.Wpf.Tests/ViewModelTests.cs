@@ -44,6 +44,46 @@ public sealed class ViewModelTests
         await row.RestartAsync(); row.LastResult.Should().Contain("restarted");
     }
 
+    [Fact] public async Task Row_projects_bridge_account_and_algo_permissions()
+    {
+        var process=new Process { State=new(TerminalState.Running,42,null) }; var runtime=new Runtime{Snapshot=NewSnapshot(AlgoTradingState.Enabled)};
+        var row=new TerminalRowViewModel(T(),process,new Inspector(),runtime,new Algo());
+        await row.RefreshStateAsync();
+        row.AccountSummary.Should().Be("12345 · Trader · Broker-Live · Real");
+        row.AlgoSummary.Should().Be("Global Enabled · EA allowed · Account allowed · Expert allowed · connected");
+        row.EnableAlgoCommand.CanExecute(null).Should().BeFalse("the requested global state is already active");
+        row.DisableAlgoCommand.CanExecute(null).Should().BeTrue();
+    }
+
+    [Fact] public async Task Row_hides_bridge_state_and_refuses_algo_command_without_snapshot()
+    {
+        var process=new Process { State=new(TerminalState.Running,42,null) }; var row=new TerminalRowViewModel(T(),process,new Inspector());
+        await row.RefreshStateAsync();
+        row.AccountSummary.Should().Be("Bridge unavailable"); row.AlgoSummary.Should().Be("Algo Trading unknown");
+        row.EnableAlgoCommand.CanExecute(null).Should().BeFalse(); row.DisableAlgoCommand.CanExecute(null).Should().BeFalse();
+    }
+
+    [Fact] public async Task Algo_command_uses_controller_and_refreshes_result()
+    {
+        var process=new Process { State=new(TerminalState.Running,42,null) }; var runtime=new Runtime{Snapshot=NewSnapshot(AlgoTradingState.Disabled)};
+        var algo=new Algo{Result=new(true,"Algo Trading was enabled.",NewSnapshot(AlgoTradingState.Enabled))};
+        var row=new TerminalRowViewModel(T(),process,new Inspector(),runtime,algo);
+        await row.RefreshStateAsync(); row.EnableAlgoCommand.CanExecute(null).Should().BeTrue();
+        await row.EnableAlgoAsync();
+        algo.Calls.Should().Be(1); algo.LastEnable.Should().BeTrue(); row.LastResult.Should().Be("Algo Trading was enabled."); row.AlgoSummary.Should().Contain("Global Enabled");
+    }
+
+    [Fact] public async Task Algo_command_surfaces_controller_failure()
+    {
+        var process=new Process { State=new(TerminalState.Running,42,null) }; var runtime=new Runtime{Snapshot=NewSnapshot(AlgoTradingState.Disabled)};
+        var algo=new Algo{Result=new(false,"Several matching MetaTrader 5 windows were found.",null)};
+        var row=new TerminalRowViewModel(T(),process,new Inspector(),runtime,algo);
+        await row.RefreshStateAsync(); await row.EnableAlgoAsync();
+        row.Error.Should().Be("Several matching MetaTrader 5 windows were found."); row.LastResult.Should().Contain("Failed");
+    }
+
+    static TerminalAccountSnapshot NewSnapshot(AlgoTradingState state)=>new(1,DateTimeOffset.UtcNow,@"C:\Data",12345,"Trader","Broker-Live","Broker Ltd",AccountTradeMode.Real,true,state,true,true,true);
+
     [Fact] public async Task Cleanup_recovers_after_preparation_exception_and_requires_confirmation()
     {
         var terminal=T(); var vm=new CleanupViewModel(terminal,new Inspector(),CoordinatorFor(terminal)); vm.Categories[0].IsSelected=true; vm.IsDestructiveConfirmed=false;
@@ -155,5 +195,7 @@ public sealed class ViewModelTests
     sealed class Cleaner:ITerminalCleanupService { public Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(TerminalRegistration t,IReadOnlySet<CleanupCategory> c,CancellationToken x)=>Task.FromResult<IReadOnlyList<CleanupCategoryResult>>([new(CleanupCategory.Logs,11,1100,[new("locked","denied")])]); }
     sealed class BlockingCleaner:ITerminalCleanupService { public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously); public int Calls; public async Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(TerminalRegistration t,IReadOnlySet<CleanupCategory> c,CancellationToken x){Calls++;Started.SetResult();await Release.Task;return [];} }
     sealed class Audit:IAuditLogger { public Task AppendAsync(AuditRecord r,CancellationToken c=default)=>Task.CompletedTask; }
+    sealed class Runtime:ITerminalRuntimeInspector{public TerminalAccountSnapshot? Snapshot;public Task<TerminalAccountSnapshot?> ReadAsync(TerminalRegistration t,CancellationToken c=default)=>Task.FromResult(Snapshot);}
+    sealed class Algo:ITerminalAlgoTradingController{public int Calls;public bool? LastEnable;public AlgoTradingControlResult Result=new(true,"ok",null);public Task<AlgoTradingControlResult> SetAsync(TerminalRegistration t,bool enable,CancellationToken c=default){Calls++;LastEnable=enable;Result=Result with{Snapshot=Result.Snapshot??null};return Task.FromResult(Result);}}
     static TerminalOperationCoordinator CoordinatorFor(TerminalRegistration t,bool timeout=true,ITerminalCleanupService? cleaner=null){var r=new Registry{Items=[t]};return new(r,new Process{Timeout=timeout},cleaner??new Cleaner(),new Audit());}
 }
