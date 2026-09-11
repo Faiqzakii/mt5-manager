@@ -7,7 +7,7 @@ namespace Mt5Manager.Infrastructure.Processes;
 
 public interface IAlgoTradingInput
 {
-    bool TrySend(nint window);
+    bool TryAcquire(nint window, out IDisposable? lease);
 }
 
 public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingController
@@ -65,15 +65,19 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
             var windows = windowFinder(state.ProcessId.Value);
             if (windows.Count != 1) return new(false, windows.Count == 0 ? "No matching MetaTrader 5 window was found." : "Several matching MetaTrader 5 windows were found.", current);
 
-            if (!input.TrySend(windows[0])) return new(false, "The Ctrl+E shortcut could not be delivered to the terminal window.", current);
+            if (!input.TryAcquire(windows[0], out var lease) || lease is null)
+                return new(false, "The Ctrl+E shortcut could not be delivered to the terminal window.", current);
 
-            var deadline = clock().Add(timeout);
-            while (true)
+            using (lease)
             {
-                var observed = await inspector.ReadAsync(terminal, cancellationToken);
-                if (observed?.GlobalAlgoTrading == desired) return new(true, enable ? "Algo Trading was enabled." : "Algo Trading was disabled.", observed);
-                if (clock() >= deadline) return new(false, enable ? "Algo Trading did not become enabled." : "Algo Trading did not become disabled.", observed ?? current);
-                await Task.Delay(pollInterval, cancellationToken);
+                var deadline = clock().Add(timeout);
+                while (true)
+                {
+                    var observed = await inspector.ReadAsync(terminal, cancellationToken);
+                    if (observed?.GlobalAlgoTrading == desired) return new(true, enable ? "Algo Trading was enabled." : "Algo Trading was disabled.", observed);
+                    if (clock() >= deadline) return new(false, enable ? "Algo Trading did not become enabled." : "Algo Trading did not become disabled.", observed ?? current);
+                    await Task.Delay(pollInterval, cancellationToken);
+                }
             }
         }
         catch (OperationCanceledException) { throw; }
@@ -95,24 +99,52 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
 
     private sealed class Win32AlgoTradingInput : IAlgoTradingInput
     {
-        public bool TrySend(nint window)
+        public bool TryAcquire(nint window, out IDisposable? lease)
         {
+            lease = null;
             var foreground = GetForegroundWindow();
             if (window != foreground && !SetForegroundWindow(window)) return false;
-            if (!PostMessage(window, WmSyscommand, ScRestore, 0)) return false;
+            if (!PostMessage(window, WmSyscommand, ScRestore, 0))
+            {
+                RestoreForeground(foreground);
+                return false;
+            }
 
             var previousThread = GetWindowThreadProcessId(window, 0);
             var currentThread = GetCurrentThreadId();
-            if (previousThread != currentThread && !AttachThreadInput(currentThread, previousThread, true)) return false;
-            try
+            var attached = previousThread != currentThread;
+            if (attached && !AttachThreadInput(currentThread, previousThread, true))
             {
-                if (!SendInput([KeyDown(VkControl), KeyDown(VkE), KeyUp(VkE), KeyUp(VkControl)])) return false;
-                return true;
+                RestoreForeground(foreground);
+                return false;
             }
-            finally
+
+            if (!SendInput([KeyDown(VkControl), KeyDown(VkE), KeyUp(VkE), KeyUp(VkControl)]))
             {
-                if (previousThread != currentThread) AttachThreadInput(currentThread, previousThread, false);
-                if (foreground != nint.Zero) SetForegroundWindow(foreground);
+                if (attached) AttachThreadInput(currentThread, previousThread, false);
+                RestoreForeground(foreground);
+                return false;
+            }
+
+            lease = new ForegroundLease(foreground, currentThread, previousThread, attached);
+            return true;
+        }
+
+        private static void RestoreForeground(nint foreground)
+        {
+            if (foreground != nint.Zero) SetForegroundWindow(foreground);
+        }
+
+        private sealed class ForegroundLease(nint foreground, uint currentThread, uint previousThread, bool attached) : IDisposable
+        {
+            private bool disposed;
+
+            public void Dispose()
+            {
+                if (disposed) return;
+                disposed = true;
+                if (attached) AttachThreadInput(currentThread, previousThread, false);
+                RestoreForeground(foreground);
             }
         }
 

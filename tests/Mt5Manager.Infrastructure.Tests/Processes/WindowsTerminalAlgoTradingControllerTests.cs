@@ -58,6 +58,24 @@ public sealed class WindowsTerminalAlgoTradingControllerTests
         input.Sent.Should().Equal([(4242, true)]);
     }
 
+
+    [Fact]
+    public async Task Set_holds_input_lease_until_desired_state_is_observed()
+    {
+        var input = new FakeInput();
+        var inspector = new FakeInspector(
+            () => Snapshot(AlgoTradingState.Disabled),
+            () =>
+            {
+                input.LeaseDisposed.Should().BeFalse("the terminal must retain focus while confirmation is polled");
+                return Snapshot(AlgoTradingState.Enabled);
+            });
+
+        var result = await new WindowsTerminalAlgoTradingController(inspector, RunningProcess(42), _ => [4242], input, FakeClock()).SetAsync(terminal, true);
+
+        result.Success.Should().BeTrue();
+        input.LeaseDisposed.Should().BeTrue("focus must be restored after confirmation completes");
+    }
     [Fact]
     public async Task Set_fails_when_observed_state_does_not_change()
     {
@@ -88,17 +106,29 @@ public sealed class WindowsTerminalAlgoTradingControllerTests
     private static Func<DateTimeOffset> FakeClock() => () => DateTimeOffset.UnixEpoch;
     private static TerminalAccountSnapshot Snapshot(AlgoTradingState state) => new(1, DateTimeOffset.UtcNow, @"C:\Data", 123, "Trader", "Server", "Company", AccountTradeMode.Real, true, state, true, true, true);
 
-    private sealed class FakeInspector(params TerminalAccountSnapshot?[] snapshots) : ITerminalRuntimeInspector
+    private sealed class FakeInspector(params Func<TerminalAccountSnapshot?>[] snapshots) : ITerminalRuntimeInspector
     {
         private int call;
+        public FakeInspector(params TerminalAccountSnapshot?[] snapshots) : this(snapshots.Select<TerminalAccountSnapshot?, Func<TerminalAccountSnapshot?>>(snapshot => () => snapshot).ToArray()) { }
         public Task<TerminalAccountSnapshot?> ReadAsync(TerminalRegistration terminal, CancellationToken cancellationToken = default) =>
-            Task.FromResult(call < snapshots.Length ? snapshots[call++] : null);
+            Task.FromResult(call < snapshots.Length ? snapshots[call++]() : null);
     }
 
     private sealed class FakeInput : IAlgoTradingInput
     {
         public List<(nint Window, bool Sent)> Sent { get; } = [];
-        public bool TrySend(nint window) { Sent.Add((window, true)); return true; }
+        public bool LeaseDisposed { get; private set; }
+        public bool TryAcquire(nint window, out IDisposable? lease)
+        {
+            Sent.Add((window, true));
+            lease = new CallbackDisposable(() => LeaseDisposed = true);
+            return true;
+        }
+    }
+
+    private sealed class CallbackDisposable(Action callback) : IDisposable
+    {
+        public void Dispose() => callback();
     }
 
     private sealed class FakeProcess(TerminalRuntimeState state) : ITerminalProcessController
