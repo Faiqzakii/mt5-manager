@@ -28,6 +28,7 @@ public sealed class TerminalOperationCoordinator
     private readonly TimeSpan _stopTimeout;
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _gates = new();
     private readonly ConcurrentDictionary<Guid, CleanupPreparation> _issuedRejections = new();
+    private readonly ConcurrentDictionary<Guid, CleanupPreparation> _issuedActive = new();
     private readonly ConcurrentDictionary<Guid, Guid> _reservations = new();
 
     public TerminalOperationCoordinator(ITerminalRegistry registry, ITerminalProcessController processController,
@@ -66,19 +67,19 @@ public sealed class TerminalOperationCoordinator
             {
                 var state = await _processController.GetStateAsync(found, cancellationToken);
                 if (state.State == TerminalState.Error)
-                    return Prepared(CleanupPreparationStatus.Rejected, request, false,
+                    return IssueActive(CleanupPreparationStatus.Rejected, request, false,
                         state.Error ?? "The terminal state could not be determined.", snapshot, token);
                 if (state.State == TerminalState.Stopped)
-                    return Prepared(CleanupPreparationStatus.Ready, request, false, null, snapshot, token);
+                    return IssueActive(CleanupPreparationStatus.Ready, request, false, null, snapshot, token);
 
                 var stop = await _processController.StopAsync(found, _stopTimeout, false, cancellationToken);
                 return stop.Outcome switch
                 {
                     StopOutcome.ExitedGracefully or StopOutcome.AlreadyStopped =>
-                        Prepared(CleanupPreparationStatus.Ready, request, true, null, snapshot, token),
-                    StopOutcome.TimedOut => Prepared(CleanupPreparationStatus.RequiresForceConfirmation, request, true,
+                        IssueActive(CleanupPreparationStatus.Ready, request, true, null, snapshot, token),
+                    StopOutcome.TimedOut => IssueActive(CleanupPreparationStatus.RequiresForceConfirmation, request, true,
                         "The terminal did not close within the timeout. Force termination is required to continue.", snapshot, token),
-                    _ => Prepared(CleanupPreparationStatus.Rejected, request, true,
+                    _ => IssueActive(CleanupPreparationStatus.Rejected, request, true,
                         stop.Error ?? "The terminal could not be stopped.", snapshot, token)
                 };
             }
@@ -207,10 +208,23 @@ public sealed class TerminalOperationCoordinator
             results.Select(result => new AuditCategoryOutcome(result.Category, result.DeletedFiles,
                 result.DeletedBytes, result.Failures)).ToArray(), restarted, restartError));
 
-    private bool Consume(CleanupPreparation preparation) => preparation.ReservationToken != Guid.Empty &&
-        _reservations.TryRemove(new KeyValuePair<Guid, Guid>(preparation.Request.TerminalId, preparation.ReservationToken));
+    private bool Consume(CleanupPreparation preparation)
+    {
+        if (!_issuedActive.TryGetValue(preparation.ReservationToken, out var issued) || issued != preparation)
+            return false;
+        if (!_reservations.TryRemove(new KeyValuePair<Guid, Guid>(preparation.Request.TerminalId, preparation.ReservationToken)))
+            return false;
+        return _issuedActive.TryRemove(new KeyValuePair<Guid, CleanupPreparation>(preparation.ReservationToken, issued));
+    }
     private void Release(CleanupPreparation preparation) =>
         _reservations.TryRemove(new KeyValuePair<Guid, Guid>(preparation.Request.TerminalId, preparation.ReservationToken));
+    private CleanupPreparation IssueActive(CleanupPreparationStatus status, CleanupRequest request, bool wasRunning,
+        string? message, TerminalRegistration terminal, Guid token)
+    {
+        var preparation = Prepared(status, request, wasRunning, message, terminal, token);
+        _issuedActive.TryAdd(token, preparation);
+        return preparation;
+    }
     private CleanupPreparation IssueRejected(CleanupRequest request, TerminalRegistration terminal, string message)
     {
         var preparation = Prepared(CleanupPreparationStatus.Rejected, request, false, message, terminal, Guid.NewGuid());

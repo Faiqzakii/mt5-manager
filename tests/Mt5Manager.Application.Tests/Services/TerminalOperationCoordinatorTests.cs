@@ -404,6 +404,36 @@ public sealed class TerminalOperationCoordinatorTests
         record.TerminalName.Should().Be("Terminal");
     }
 
+    [Theory]
+    [InlineData("categories")]
+    [InlineData("status")]
+    [InlineData("running")]
+    [InlineData("snapshot")]
+    public async Task Tampered_preparation_is_rejected_without_consuming_the_original(string field)
+    {
+        var terminalId = Guid.NewGuid();
+        var cleanup = new FakeCleanupService();
+        var audit = new RecordingAuditLogger();
+        var coordinator = Coordinator(new FakeRegistry(Registration(terminalId)), new FakeProcessController(), cleanup, audit);
+        var original = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs));
+        var tampered = field switch
+        {
+            "categories" => original with { Request = Request(terminalId, CleanupCategory.Ticks) },
+            "status" => original with { Status = CleanupPreparationStatus.RequiresForceConfirmation },
+            "running" => original with { WasRunning = !original.WasRunning },
+            _ => original with { TerminalSnapshot = original.TerminalSnapshot with { DisplayName = "Forged" } }
+        };
+
+        var rejected = await coordinator.ContinueCleanupAsync(tampered, forceApproved: true);
+        var completed = await coordinator.ContinueCleanupAsync(original, forceApproved: false);
+
+        rejected.Status.Should().Be(CleanupOutcomeStatus.Rejected);
+        rejected.Message.Should().Be("This cleanup preparation is no longer active.");
+        completed.Status.Should().Be(CleanupOutcomeStatus.Completed);
+        cleanup.Requests.Should().ContainSingle();
+        audit.Records.Should().HaveCount(2);
+    }
+
     [Fact]
     public async Task Replaying_a_consumed_preparation_rejects_safely_and_audits_the_attempt_once()
     {
