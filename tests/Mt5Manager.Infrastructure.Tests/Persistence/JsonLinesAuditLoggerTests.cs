@@ -78,6 +78,31 @@ public sealed class JsonLinesAuditLoggerTests : IDisposable
         File.Exists(path).Should().BeTrue();
     }
 
+    [Fact]
+    public async Task Dispose_does_not_break_already_started_appends()
+    {
+        var logger = new JsonLinesAuditLogger(AuditPath);
+        var appends = Enumerable.Range(0, 100)
+            .Select(_ => logger.AppendAsync(Record(Guid.NewGuid(), AuditOutcome.Completed)))
+            .ToArray();
+
+        logger.Dispose();
+
+        await Task.WhenAll(appends);
+        (await File.ReadAllLinesAsync(AuditPath)).Should().HaveCount(100);
+    }
+
+    [Fact]
+    public async Task Append_after_dispose_is_rejected()
+    {
+        var logger = new JsonLinesAuditLogger(AuditPath);
+        logger.Dispose();
+
+        var action = () => logger.AppendAsync(Record(Guid.NewGuid(), AuditOutcome.Completed));
+
+        await action.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
     private static Guid ReadTerminalId(string line)
     {
         using var document = JsonDocument.Parse(line);

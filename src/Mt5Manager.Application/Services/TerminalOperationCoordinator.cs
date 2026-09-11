@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Collections.Concurrent;
 using Mt5Manager.Application.Abstractions;
 using Mt5Manager.Domain.Models;
@@ -47,45 +48,46 @@ public sealed class TerminalOperationCoordinator
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var found = await FindTerminalAsync(request.TerminalId, cancellationToken);
-        var snapshot = found ?? UnknownTerminal(request.TerminalId);
-        var gate = GateFor(request.TerminalId);
+        var ownedRequest = new CleanupRequest(request.TerminalId, request.Categories.ToFrozenSet());
+        var found = await FindTerminalAsync(ownedRequest.TerminalId, cancellationToken);
+        var snapshot = Snapshot(found ?? UnknownTerminal(ownedRequest.TerminalId));
+        var gate = GateFor(ownedRequest.TerminalId);
         await gate.WaitAsync(cancellationToken);
         try
         {
-            if (_reservations.ContainsKey(request.TerminalId))
-                return IssueRejected(request, snapshot, "Another operation is already prepared for this terminal.");
-            if (found is null) return IssueRejected(request, snapshot, "The terminal is no longer registered.");
+            if (_reservations.ContainsKey(ownedRequest.TerminalId))
+                return IssueRejected(ownedRequest, snapshot, "Another operation is already prepared for this terminal.");
+            if (found is null) return IssueRejected(ownedRequest, snapshot, "The terminal is no longer registered.");
             if (!found.DataDirectoryVerified)
-                return IssueRejected(request, snapshot, "Cleanup requires a verified terminal data directory.");
+                return IssueRejected(ownedRequest, snapshot, "Cleanup requires a verified terminal data directory.");
 
             var token = Guid.NewGuid();
-            if (!_reservations.TryAdd(request.TerminalId, token))
-                return IssueRejected(request, snapshot, "Another operation is already prepared for this terminal.");
+            if (!_reservations.TryAdd(ownedRequest.TerminalId, token))
+                return IssueRejected(ownedRequest, snapshot, "Another operation is already prepared for this terminal.");
 
             try
             {
                 var state = await _processController.GetStateAsync(found, cancellationToken);
                 if (state.State == TerminalState.Error)
-                    return IssueActive(CleanupPreparationStatus.Rejected, request, false,
+                    return IssueActive(CleanupPreparationStatus.Rejected, ownedRequest, false,
                         state.Error ?? "The terminal state could not be determined.", snapshot, token);
                 if (state.State == TerminalState.Stopped)
-                    return IssueActive(CleanupPreparationStatus.Ready, request, false, null, snapshot, token);
+                    return IssueActive(CleanupPreparationStatus.Ready, ownedRequest, false, null, snapshot, token);
 
                 var stop = await _processController.StopAsync(found, _stopTimeout, false, cancellationToken);
                 return stop.Outcome switch
                 {
                     StopOutcome.ExitedGracefully or StopOutcome.AlreadyStopped =>
-                        IssueActive(CleanupPreparationStatus.Ready, request, true, null, snapshot, token),
-                    StopOutcome.TimedOut => IssueActive(CleanupPreparationStatus.RequiresForceConfirmation, request, true,
+                        IssueActive(CleanupPreparationStatus.Ready, ownedRequest, true, null, snapshot, token),
+                    StopOutcome.TimedOut => IssueActive(CleanupPreparationStatus.RequiresForceConfirmation, ownedRequest, true,
                         "The terminal did not close within the timeout. Force termination is required to continue.", snapshot, token),
-                    _ => IssueActive(CleanupPreparationStatus.Rejected, request, true,
+                    _ => IssueActive(CleanupPreparationStatus.Rejected, ownedRequest, true,
                         stop.Error ?? "The terminal could not be stopped.", snapshot, token)
                 };
             }
             catch
             {
-                _reservations.TryRemove(new KeyValuePair<Guid, Guid>(request.TerminalId, token));
+                _reservations.TryRemove(new KeyValuePair<Guid, Guid>(ownedRequest.TerminalId, token));
                 throw;
             }
         }
@@ -242,6 +244,8 @@ public sealed class TerminalOperationCoordinator
     private async Task<TerminalRegistration?> FindTerminalAsync(Guid id, CancellationToken token) =>
         (await _registry.LoadAsync(token)).FirstOrDefault(terminal => terminal.Id == id);
     private SemaphoreSlim GateFor(Guid id) => _gates.GetOrAdd(id, static _ => new SemaphoreSlim(1, 1));
+    private static TerminalRegistration Snapshot(TerminalRegistration terminal) =>
+        terminal with { Arguments = terminal.Arguments.ToArray() };
     private static TerminalRegistration UnknownTerminal(Guid id) =>
         new(id, "Unknown terminal", string.Empty, string.Empty, string.Empty, [], DiscoverySource.Manual, false);
 }

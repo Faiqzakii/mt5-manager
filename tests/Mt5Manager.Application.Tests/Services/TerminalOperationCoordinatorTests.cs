@@ -454,6 +454,24 @@ public sealed class TerminalOperationCoordinatorTests
 
 
     [Fact]
+    public async Task Mutating_request_categories_after_prepare_cannot_expand_cleanup_scope()
+    {
+        var terminalId = Guid.NewGuid();
+        var categories = new HashSet<CleanupCategory> { CleanupCategory.Logs };
+        var request = new CleanupRequest(terminalId, categories);
+        var cleanup = new FakeCleanupService();
+        var coordinator = Coordinator(new FakeRegistry(Registration(terminalId)), new FakeProcessController(), cleanup, new RecordingAuditLogger());
+        var preparation = await coordinator.PrepareCleanupAsync(request);
+
+        categories.Add(CleanupCategory.Ticks);
+        var outcome = await coordinator.ContinueCleanupAsync(preparation, forceApproved: false);
+
+        outcome.Status.Should().Be(CleanupOutcomeStatus.Completed);
+        cleanup.Requests.Should().ContainSingle();
+        cleanup.Requests[0].Should().Equal(CleanupCategory.Logs);
+    }
+
+    [Fact]
     public async Task Operations_on_the_same_terminal_serialize()
     {
         var terminalId = Guid.NewGuid();

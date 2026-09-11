@@ -18,6 +18,7 @@ public sealed class JsonLinesAuditLogger : IAuditLogger, IDisposable
 
     private readonly string _path;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private int _disposed;
 
     public JsonLinesAuditLogger(string? path = null) => _path = path ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
@@ -26,6 +27,7 @@ public sealed class JsonLinesAuditLogger : IAuditLogger, IDisposable
     public async Task AppendAsync(AuditRecord record, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(record);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         var line = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(record, Options) + "\n");
 
         await _gate.WaitAsync(cancellationToken);
@@ -44,5 +46,5 @@ public sealed class JsonLinesAuditLogger : IAuditLogger, IDisposable
         }
     }
 
-    public void Dispose() => _gate.Dispose();
+    public void Dispose() => Interlocked.Exchange(ref _disposed, 1);
 }
