@@ -41,6 +41,19 @@ public sealed class Mt5DataDirectoryResolverTests : IDisposable
     }
 
     [Fact]
+    public void Resolve_portable_uses_executable_directory_not_shortcut_start_in()
+    {
+        CreateStructure(installation);
+        var unrelatedStartIn = Directory.CreateDirectory(Path.Combine(root, "Unrelated MT5 Data")).FullName;
+        CreateStructure(unrelatedStartIn);
+        var terminal = Terminal(["/portable"]) with { WorkingDirectory = unrelatedStartIn };
+
+        var resolved = new Mt5DataDirectoryResolver(appData).Resolve(terminal);
+
+        resolved.Should().Be(installation);
+    }
+
+    [Fact]
     public void Resolve_rejects_matching_origin_without_mt5_data_structure()
     {
         var candidate = Directory.CreateDirectory(Path.Combine(appData, "A1")).FullName;

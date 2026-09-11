@@ -24,8 +24,10 @@ public sealed class Mt5DataDirectoryResolver : IMt5DataDirectoryResolver
             return Canonicalize(terminal.DataDirectory);
 
         var matches = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (HasPortableArgument(terminal.Arguments) && IsSafeStructuredDirectory(terminal.WorkingDirectory))
-            matches.Add(Canonicalize(terminal.WorkingDirectory));
+        var executableDirectory = Path.GetDirectoryName(Canonicalize(terminal.ExecutablePath));
+        if (HasPortableArgument(terminal.Arguments) && executableDirectory is not null &&
+            IsSafeStructuredDirectory(executableDirectory))
+            matches.Add(Canonicalize(executableDirectory));
 
         foreach (var candidate in OriginCandidates(terminal.ExecutablePath)) matches.Add(candidate);
         return matches.Count == 1 ? matches.Single() : null;
@@ -65,7 +67,7 @@ public sealed class Mt5DataDirectoryResolver : IMt5DataDirectoryResolver
         string.Equals(argument.Trim(), "/portable", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(argument.Trim(), "-portable", StringComparison.OrdinalIgnoreCase));
 
-    private static bool IsSafeStructuredDirectory(string path)
+    private static bool IsSafeStructuredDirectory(string? path)
     {
         if (string.IsNullOrWhiteSpace(path)) return false;
         try
