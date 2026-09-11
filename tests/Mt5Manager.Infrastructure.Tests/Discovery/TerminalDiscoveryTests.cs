@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -12,6 +13,8 @@ namespace Mt5Manager.Infrastructure.Tests.Discovery;
 public sealed class TerminalDiscoveryTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"mt5-discovery-{Guid.NewGuid():N}");
+
+    private readonly List<Process> _spawned = [];
 
     public TerminalDiscoveryTests() => Directory.CreateDirectory(_root);
 
@@ -151,8 +154,140 @@ public sealed class TerminalDiscoveryTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Enumerate_continues_when_one_terminal_handle_cannot_be_opened()
+    {
+        var (directory, executable) = CreateTerminalFixture();
+        var blocked = StartTerminal(executable, Path.Combine(directory, "blocked.json"));
+        var surviving = StartTerminal(executable, Path.Combine(directory, "surviving.json"));
+
+        try
+        {
+            // Both terminals must be running before the assertion, so absence can only mean the handle failed.
+            await WaitForFileAsync(Path.Combine(directory, "blocked.json"));
+            await WaitForFileAsync(Path.Combine(directory, "surviving.json"));
+            blocked.HasExited.Should().BeFalse();
+            var terminals = new WindowsRunningTerminalEnumerator(new BlockingHandleSource(blocked.Id))
+                .Enumerate().ToArray();
+
+            terminals.Should().ContainSingle(item => item.CommandLine.Contains("surviving.json"));
+            terminals.Should().NotContain(item => item.CommandLine.Contains("blocked.json"));
+        }
+        finally
+        {
+            Kill(blocked, surviving);
+        }
+    }
+
+    [Fact]
+    public async Task Enumerate_resolves_executable_and_command_line_of_running_terminal()
+    {
+        var (directory, executable) = CreateTerminalFixture();
+        var dataDirectory = Path.Combine(directory, "Data");
+        var process = StartTerminal(executable, Path.Combine(directory, "sole.json"), $"/datadir:{dataDirectory}");
+
+        try
+        {
+            await WaitForFileAsync(Path.Combine(directory, "sole.json"));
+
+            var terminals = await WaitForTerminalAsync(new WindowsRunningTerminalEnumerator(), "sole.json");
+            var terminal = terminals.Should().ContainSingle(item => item.CommandLine.Contains("sole.json")).Subject;
+
+            terminal.ExecutablePath.Should().Be(executable);
+            terminal.CommandLine.Should().Contain($"/datadir:{dataDirectory}");
+        }
+        finally
+        {
+            Kill(process);
+        }
+    }
+
     private static TerminalRegistration Candidate(DiscoverySource source, string executable, string data, string name) =>
         new(Guid.NewGuid(), name, executable, data, Path.GetDirectoryName(executable)!, [], source, data.Length > 0);
+
+
+    private (string Directory, string Executable) CreateTerminalFixture()
+    {
+        var fixtureRoot = Path.Combine(FindRepositoryRoot(), "tests", "Fixtures", "ExitOnClose",
+            "bin", "Debug", "net8.0-windows");
+        File.Exists(Path.Combine(fixtureRoot, "ExitOnClose.exe"))
+            .Should().BeTrue($"fixture should be built at {fixtureRoot}");
+        var directory = Directory.CreateDirectory(Path.Combine(_root, $"terminal64-{Guid.NewGuid():N}")).FullName;
+        foreach (var file in Directory.GetFiles(fixtureRoot))
+            File.Copy(file, Path.Combine(directory, Path.GetFileName(file)));
+        var executable = Path.Combine(directory, "terminal64.exe");
+        File.Move(Path.Combine(directory, "ExitOnClose.exe"), executable);
+        return (directory, executable);
+    }
+
+    private Process StartTerminal(string executable, string outputPath, params string[] arguments)
+    {
+        var startInfo = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = false,
+            WorkingDirectory = Path.GetDirectoryName(executable)!
+        };
+        startInfo.ArgumentList.Add(outputPath);
+        startInfo.ArgumentList.Add("ignore");
+        foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
+        var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start fixture.");
+        _spawned.Add(process);
+        return process;
+    }
+
+    private static async Task WaitForFileAsync(string path)
+    {
+        for (var attempt = 0; attempt < 200 && !File.Exists(path); attempt++) await Task.Delay(25);
+        File.Exists(path).Should().BeTrue($"fixture should have started and written {path}");
+    }
+
+    private static async Task<IReadOnlyList<RunningTerminal>> WaitForTerminalAsync(
+        IRunningTerminalEnumerator enumerator, string marker)
+    {
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            var terminals = enumerator.Enumerate().ToArray();
+            if (terminals.Any(item => item.CommandLine.Contains(marker))) return terminals;
+            await Task.Delay(50);
+        }
+        throw new TimeoutException($"Terminal '{marker}' was not enumerated.");
+    }
+
+    private static void Kill(params Process[] processes)
+    {
+        foreach (var process in processes) Kill(process);
+    }
+
+    private static void Kill(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(5000);
+            }
+        }
+        catch (InvalidOperationException) { }
+        finally { process.Dispose(); }
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Mt5Manager.sln")))
+            directory = directory.Parent;
+        return directory?.FullName ?? throw new DirectoryNotFoundException("Repository root not found.");
+    }
+
+    private sealed class BlockingHandleSource(int blockedProcessId) : IProcessHandleSource
+    {
+        private readonly LimitedRightsProcessHandleSource _inner = new();
+
+        public nint Open(int processId) => processId == blockedProcessId ? nint.Zero : _inner.Open(processId);
+
+        public void Close(nint handle) => _inner.Close(handle);
+    }
 
     private sealed class StubSource(params TerminalRegistration[] candidates) : ITerminalDiscoverySource
     {
@@ -187,6 +322,12 @@ public sealed class TerminalDiscoveryTests : IDisposable
 
     public void Dispose()
     {
-        if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
+        foreach (var process in _spawned) Kill(process);
+        for (var attempt = 0; attempt < 20 && Directory.Exists(_root); attempt++)
+        {
+            try { Directory.Delete(_root, recursive: true); }
+            catch (IOException) { Thread.Sleep(50); }
+            catch (UnauthorizedAccessException) { Thread.Sleep(50); }
+        }
     }
 }

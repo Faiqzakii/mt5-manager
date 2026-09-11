@@ -52,8 +52,33 @@ public sealed class ProcessDiscoverySource(IRunningTerminalEnumerator? enumerato
     }
 }
 
-public sealed class WindowsRunningTerminalEnumerator : IRunningTerminalEnumerator
+public interface IProcessHandleSource
 {
+    nint Open(int processId);
+    void Close(nint handle);
+}
+
+// Discovery runs unelevated, so query rights are all that may be requested.
+public sealed class LimitedRightsProcessHandleSource : IProcessHandleSource
+{
+    private const int ProcessQueryLimitedInformation = 0x1000;
+
+    public nint Open(int processId) => OpenProcess(ProcessQueryLimitedInformation, false, processId);
+
+    public void Close(nint handle) => CloseHandle(handle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint OpenProcess(int desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, int processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(nint handle);
+}
+
+public sealed class WindowsRunningTerminalEnumerator(IProcessHandleSource? handles = null) : IRunningTerminalEnumerator
+{
+    private readonly IProcessHandleSource _handles = handles ?? new LimitedRightsProcessHandleSource();
+
     public IEnumerable<RunningTerminal> Enumerate()
     {
         if (!OperatingSystem.IsWindows()) yield break;
@@ -61,21 +86,19 @@ public sealed class WindowsRunningTerminalEnumerator : IRunningTerminalEnumerato
         {
             using (process)
             {
-                string? executable = null;
-                try { executable = ReadImagePath(process.Handle); } catch { }
-                if (string.IsNullOrWhiteSpace(executable)) continue;
-                var commandLine = ReadCommandLine(process.Handle) ?? Quote(executable);
-                yield return new RunningTerminal(executable, commandLine);
+                var handle = _handles.Open(process.Id);
+                if (handle == nint.Zero) continue;
+                try
+                {
+                    var size = 32768;
+                    var buffer = new StringBuilder(size);
+                    if (!QueryFullProcessImageName(handle, 0, buffer, ref size)) continue;
+                    var executable = buffer.ToString();
+                    yield return new RunningTerminal(executable, ReadCommandLine(handle) ?? Quote(executable));
+                }
+                finally { _handles.Close(handle); }
             }
         }
-    }
-
-    private static string ReadImagePath(nint handle)
-    {
-        var size = 32768;
-        var buffer = new StringBuilder(size);
-        if (!QueryFullProcessImageName(handle, 0, buffer, ref size)) throw new Win32Exception();
-        return buffer.ToString();
     }
 
     private static string? ReadCommandLine(nint handle)
