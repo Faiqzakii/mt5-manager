@@ -51,11 +51,11 @@ public sealed class TerminalCleanupServiceTests : StorageTestBase
     }
 
     [Fact]
-    public async Task CleanAsync_records_unreadable_directory_and_continues_deleting()
+    public async Task CleanAsync_records_denied_target_and_continues_with_later_target()
     {
-        var deniedDirectory = CreateDirectory("Logs", "a-denied");
-        WriteFile(new byte[7], "Logs", "a-denied", "blocked.log");
-        var deletable = WriteFile(new byte[5], "Logs", "z-deletable.log");
+        var deniedDirectory = CreateDirectory("Logs");
+        WriteFile(new byte[7], "Logs", "blocked.log");
+        var deletable = WriteFile(new byte[5], "MQL5", "Logs", "deletable.log");
         var identity = System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value;
         SetDirectoryDeny(deniedDirectory, identity, deny: true);
 
