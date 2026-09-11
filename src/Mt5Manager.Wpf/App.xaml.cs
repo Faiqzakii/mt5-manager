@@ -1,13 +1,18 @@
-﻿using System.Configuration;
-using System.Data;
 using System.Windows;
-
+using Microsoft.Extensions.DependencyInjection;
+using Mt5Manager.Application.Abstractions;
+using Mt5Manager.Application.Services;
+using Mt5Manager.Infrastructure.Discovery;
+using Mt5Manager.Infrastructure.Persistence;
+using Mt5Manager.Infrastructure.Processes;
+using Mt5Manager.Infrastructure.Storage;
+using Mt5Manager.Wpf.ViewModels;
 namespace Mt5Manager.Wpf;
-
-/// <summary>
-/// Interaction logic for App.xaml
-/// </summary>
-public partial class App : Application
+public partial class App:System.Windows.Application
 {
+ ServiceProvider? provider;
+ protected override void OnStartup(StartupEventArgs e){base.OnStartup(e);var services=new ServiceCollection();
+  services.AddSingleton<ITerminalRegistry,JsonTerminalRegistry>();services.AddSingleton<ITerminalProcessController,WindowsTerminalProcessController>();services.AddSingleton<IAuditLogger,JsonLinesAuditLogger>();services.AddSingleton<ICleanupTargetResolver,CleanupTargetResolver>();services.AddSingleton<ITerminalStorageInspector,TerminalStorageInspector>();services.AddSingleton<ITerminalCleanupService,TerminalCleanupService>();
+  services.AddSingleton<ITerminalDiscoverySource,ProcessDiscoverySource>();services.AddSingleton<ITerminalDiscoverySource,ShortcutDiscoverySource>();services.AddSingleton<ITerminalDiscoverySource,StandardLocationDiscoverySource>();services.AddSingleton<ITerminalDiscovery,TerminalDiscovery>();services.AddSingleton<TerminalOperationCoordinator>();services.AddSingleton<MainViewModel>(sp=>new MainViewModel(sp.GetRequiredService<ITerminalDiscovery>(),sp.GetRequiredService<ITerminalRegistry>(),sp.GetRequiredService<ITerminalProcessController>(),sp.GetRequiredService<ITerminalStorageInspector>()));services.AddSingleton<MainWindow>();provider=services.BuildServiceProvider();provider.GetRequiredService<MainWindow>().Show();}
+ protected override void OnExit(ExitEventArgs e){provider?.Dispose();base.OnExit(e);}
 }
-
