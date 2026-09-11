@@ -1,9 +1,11 @@
+using System.Runtime.Versioning;
 using FluentAssertions;
 using Mt5Manager.Domain.Models;
 using Mt5Manager.Infrastructure.Storage;
 
 namespace Mt5Manager.Infrastructure.Tests.Storage;
 
+[SupportedOSPlatform("windows")]
 public sealed class TerminalCleanupServiceTests : StorageTestBase
 {
     [Fact]
@@ -46,6 +48,45 @@ public sealed class TerminalCleanupServiceTests : StorageTestBase
             Directory.Delete(link);
             Directory.Delete(outside, true);
         }
+    }
+
+    [Fact]
+    public async Task CleanAsync_records_unreadable_directory_and_continues_deleting()
+    {
+        var deniedDirectory = CreateDirectory("Logs", "a-denied");
+        WriteFile(new byte[7], "Logs", "a-denied", "blocked.log");
+        var deletable = WriteFile(new byte[5], "Logs", "z-deletable.log");
+        var identity = System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value;
+        SetDirectoryDeny(deniedDirectory, identity, deny: true);
+
+        try
+        {
+            var result = await new TerminalCleanupService(new CleanupTargetResolver())
+                .CleanAsync(Registration, new HashSet<CleanupCategory> { CleanupCategory.Logs }, CancellationToken.None);
+
+            var category = result.Single();
+            category.DeletedFiles.Should().Be(1);
+            category.DeletedBytes.Should().Be(5);
+            category.Failures.Should().ContainSingle(x => x.Path == deniedDirectory && !string.IsNullOrWhiteSpace(x.Error));
+            File.Exists(deletable).Should().BeFalse();
+        }
+        finally
+        {
+            SetDirectoryDeny(deniedDirectory, identity, deny: false);
+        }
+    }
+
+    private static void SetDirectoryDeny(string path, string identity, bool deny)
+    {
+        using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "icacls.exe",
+            ArgumentList = { path, deny ? "/deny" : "/remove:d", deny ? $"*{identity}:(OI)(CI)F" : $"*{identity}" },
+            UseShellExecute = false,
+            CreateNoWindow = true
+        }) ?? throw new InvalidOperationException("Could not start icacls.");
+        process.WaitForExit();
+        if (process.ExitCode != 0) throw new InvalidOperationException("Could not update test directory ACL.");
     }
 
     [Fact]

@@ -26,12 +26,55 @@ public sealed class TerminalCleanupService(ICleanupTargetResolver targetResolver
             var failures = new List<FileFailure>();
 
             foreach (var target in targetResolver.Resolve(terminal, category))
+                CleanTarget(target, cancellationToken, failures, ref deletedFiles, ref deletedBytes);
+
+            results.Add(new CleanupCategoryResult(category, deletedFiles, deletedBytes, failures));
+        }
+
+        return Task.FromResult<IReadOnlyList<CleanupCategoryResult>>(results);
+    }
+
+    private static void CleanTarget(
+        string root,
+        CancellationToken cancellationToken,
+        List<FileFailure> failures,
+        ref long deletedFiles,
+        ref long deletedBytes)
+    {
+        var pending = new Stack<string>();
+        pending.Push(root);
+
+        while (pending.TryPop(out var directory))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            IEnumerator<string>? entries = null;
+            try
             {
-                foreach (var path in EnumerateFiles(target, cancellationToken))
+                entries = Directory.EnumerateFileSystemEntries(directory).GetEnumerator();
+                while (true)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    string path;
                     try
                     {
+                        if (!entries.MoveNext()) break;
+                        path = entries.Current;
+                    }
+                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                    {
+                        failures.Add(new FileFailure(directory, exception.Message));
+                        break;
+                    }
+
+                    try
+                    {
+                        var attributes = File.GetAttributes(path);
+                        if ((attributes & FileAttributes.Directory) != 0)
+                        {
+                            if ((attributes & FileAttributes.ReparsePoint) == 0) pending.Push(path);
+                            continue;
+                        }
+
                         var length = new FileInfo(path).Length;
                         File.Delete(path);
                         deletedFiles++;
@@ -43,29 +86,13 @@ public sealed class TerminalCleanupService(ICleanupTargetResolver targetResolver
                     }
                 }
             }
-
-            results.Add(new CleanupCategoryResult(category, deletedFiles, deletedBytes, failures));
-        }
-
-        return Task.FromResult<IReadOnlyList<CleanupCategoryResult>>(results);
-    }
-
-    private static IEnumerable<string> EnumerateFiles(string root, CancellationToken cancellationToken)
-    {
-        var pending = new Stack<string>();
-        pending.Push(root);
-
-        while (pending.TryPop(out var directory))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            foreach (var path in Directory.EnumerateFileSystemEntries(directory))
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var attributes = File.GetAttributes(path);
-                if ((attributes & FileAttributes.Directory) == 0)
-                    yield return path;
-                else if ((attributes & FileAttributes.ReparsePoint) == 0)
-                    pending.Push(path);
+                failures.Add(new FileFailure(directory, exception.Message));
+            }
+            finally
+            {
+                entries?.Dispose();
             }
         }
     }
