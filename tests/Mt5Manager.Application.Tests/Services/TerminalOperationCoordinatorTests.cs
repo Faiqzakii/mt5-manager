@@ -276,7 +276,8 @@ public sealed class TerminalOperationCoordinatorTests
         controller.StopForces.Should().BeEmpty();
         controller.StartedTerminals.Should().BeEmpty();
         cleanup.Requests.Should().BeEmpty();
-        audit.Records.Should().BeEmpty();
+        audit.Records.Should().ContainSingle().Which.Outcome.Should().Be(AuditOutcome.Rejected);
+        audit.Records[0].TerminalId.Should().Be(terminalId);
     }
 
     [Fact]
@@ -315,6 +316,75 @@ public sealed class TerminalOperationCoordinatorTests
         controller.StartedTerminals.Should().BeEmpty();
         audit.Records.Should().BeEmpty();
     }
+    [Fact]
+    public async Task Prepared_operation_reserves_terminal_until_it_is_continued()
+    {
+        var terminalId = Guid.NewGuid();
+        var controller = new FakeProcessController();
+        var coordinator = Coordinator(new FakeRegistry(Registration(terminalId)), controller, new FakeCleanupService(), new RecordingAuditLogger());
+
+        var first = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs));
+        var interleaved = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Ticks));
+
+        first.Status.Should().Be(CleanupPreparationStatus.Ready);
+        interleaved.Status.Should().Be(CleanupPreparationStatus.Rejected);
+        interleaved.Message.Should().Contain("operation");
+        controller.StateCalls.Should().Be(1);
+
+        (await coordinator.ContinueCleanupAsync(first, forceApproved: false)).Status.Should().Be(CleanupOutcomeStatus.Completed);
+        (await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Ticks))).Status.Should().Be(CleanupPreparationStatus.Ready);
+    }
+
+    [Fact]
+    public async Task Cancelled_preparation_releases_the_terminal_reservation()
+    {
+        var terminalId = Guid.NewGuid();
+        var coordinator = Coordinator(new FakeRegistry(Registration(terminalId)), new FakeProcessController(), new FakeCleanupService(), new RecordingAuditLogger());
+        var preparation = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs));
+
+        await coordinator.CancelPreparationAsync(preparation);
+
+        (await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Ticks))).Status
+            .Should().Be(CleanupPreparationStatus.Ready);
+    }
+
+    [Fact]
+    public async Task Disappeared_terminal_is_rejected_and_audited_from_the_preparation_snapshot()
+    {
+        var terminalId = Guid.NewGuid();
+        var registry = new FakeRegistry(Registration(terminalId));
+        var audit = new RecordingAuditLogger();
+        var coordinator = Coordinator(registry, new FakeProcessController(), new FakeCleanupService(), audit);
+        var preparation = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs));
+        await registry.SaveAsync([]);
+
+        var outcome = await coordinator.ContinueCleanupAsync(preparation, forceApproved: false);
+
+        outcome.Status.Should().Be(CleanupOutcomeStatus.Rejected);
+        var record = audit.Records.Should().ContainSingle().Subject;
+        record.Outcome.Should().Be(AuditOutcome.Rejected);
+        record.TerminalId.Should().Be(terminalId);
+        record.TerminalName.Should().Be("Terminal");
+    }
+
+    [Fact]
+    public async Task Replaying_a_consumed_preparation_rejects_safely_and_audits_the_attempt_once()
+    {
+        var terminalId = Guid.NewGuid();
+        var cleanup = new FakeCleanupService();
+        var audit = new RecordingAuditLogger();
+        var coordinator = Coordinator(new FakeRegistry(Registration(terminalId)), new FakeProcessController(), cleanup, audit);
+        var preparation = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs));
+
+        (await coordinator.ContinueCleanupAsync(preparation, forceApproved: false)).Status.Should().Be(CleanupOutcomeStatus.Completed);
+        var replay = await coordinator.ContinueCleanupAsync(preparation, forceApproved: false);
+
+        replay.Status.Should().Be(CleanupOutcomeStatus.Rejected);
+        cleanup.Requests.Should().ContainSingle();
+        audit.Records.Should().HaveCount(2);
+        audit.Records[1].Outcome.Should().Be(AuditOutcome.Rejected);
+    }
+
 
     [Fact]
     public async Task Operations_on_the_same_terminal_serialize()
@@ -336,7 +406,8 @@ public sealed class TerminalOperationCoordinatorTests
         controller.ReleaseAll();
         var preparations = await Task.WhenAll(first, second);
 
-        preparations.Should().OnlyContain(preparation => preparation.Status == CleanupPreparationStatus.Ready);
+        preparations[0].Status.Should().Be(CleanupPreparationStatus.Ready);
+        preparations[1].Status.Should().Be(CleanupPreparationStatus.Rejected);
         controller.MaxConcurrent.Should().Be(1);
     }
 
