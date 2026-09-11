@@ -8,6 +8,16 @@ namespace Mt5Manager.Wpf.Tests;
 
 public sealed class ViewModelTests
 {
+
+    [Fact] public async Task Main_refreshes_row_states_without_rescanning()
+    {
+        var discovery=new Discovery([T("Alpha")]); var process=new Process{State=new(TerminalState.Stopped,null,null)};
+        var vm=new MainViewModel(discovery,new Registry(),process); await vm.RefreshAsync();
+        vm.Terminals.Should().ContainSingle(); vm.Terminals[0].State.Should().Be(TerminalState.Stopped);
+        discovery.Items=[]; process.State=new(TerminalState.Running,77,null); await vm.RefreshStatesAsync();
+        vm.Terminals.Should().ContainSingle(); vm.Terminals[0].State.Should().Be(TerminalState.Running); vm.Terminals[0].ProcessId.Should().Be(77);
+    }
+
     static TerminalRegistration T(string name="Alpha", bool verified=true) => new(Guid.NewGuid(),name,@"C:\terminal64.exe",@"C:\Data",@"C:\",[],DiscoverySource.Manual,verified);
 
     [Fact] public async Task Main_filters_and_scan_replaces_results()
