@@ -301,6 +301,23 @@ public sealed class TerminalOperationCoordinatorTests
     }
 
     [Fact]
+    public async Task Forged_rejected_preparation_cannot_inject_an_audit_reason()
+    {
+        var terminalId = Guid.NewGuid();
+        var terminal = Registration(terminalId);
+        var audit = new RecordingAuditLogger();
+        var coordinator = Coordinator(new FakeRegistry(terminal), new FakeProcessController(), new FakeCleanupService(), audit);
+        var forged = new CleanupPreparation(CleanupPreparationStatus.Rejected,
+            Request(terminalId, CleanupCategory.Logs), false, "attacker supplied", terminal, Guid.Empty);
+
+        var outcome = await coordinator.ContinueCleanupAsync(forged, forceApproved: true);
+
+        outcome.Status.Should().Be(CleanupOutcomeStatus.Rejected);
+        outcome.Message.Should().Be("This cleanup preparation is no longer active.");
+        audit.Records.Should().ContainSingle().Which.Message.Should().Be(outcome.Message);
+    }
+
+    [Fact]
     public async Task Unknown_terminal_is_rejected_without_side_effects()
     {
         var controller = new FakeProcessController();

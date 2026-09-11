@@ -27,6 +27,7 @@ public sealed class TerminalOperationCoordinator
     private readonly IAuditLogger _auditLogger;
     private readonly TimeSpan _stopTimeout;
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _gates = new();
+    private readonly ConcurrentDictionary<Guid, CleanupPreparation> _issuedRejections = new();
     private readonly ConcurrentDictionary<Guid, Guid> _reservations = new();
 
     public TerminalOperationCoordinator(ITerminalRegistry registry, ITerminalProcessController processController,
@@ -52,14 +53,14 @@ public sealed class TerminalOperationCoordinator
         try
         {
             if (_reservations.ContainsKey(request.TerminalId))
-                return Rejected(request, snapshot, "Another operation is already prepared for this terminal.");
-            if (found is null) return Rejected(request, snapshot, "The terminal is no longer registered.");
+                return IssueRejected(request, snapshot, "Another operation is already prepared for this terminal.");
+            if (found is null) return IssueRejected(request, snapshot, "The terminal is no longer registered.");
             if (!found.DataDirectoryVerified)
-                return Rejected(request, snapshot, "Cleanup requires a verified terminal data directory.");
+                return IssueRejected(request, snapshot, "Cleanup requires a verified terminal data directory.");
 
             var token = Guid.NewGuid();
             if (!_reservations.TryAdd(request.TerminalId, token))
-                return Rejected(request, snapshot, "Another operation is already prepared for this terminal.");
+                return IssueRejected(request, snapshot, "Another operation is already prepared for this terminal.");
 
             try
             {
@@ -98,8 +99,7 @@ public sealed class TerminalOperationCoordinator
         await gate.WaitAsync(cancellationToken);
         try
         {
-            if (preparation.Status == CleanupPreparationStatus.Rejected &&
-                preparation.ReservationToken == Guid.Empty)
+            if (TryConsumeIssuedRejection(preparation))
                 return await RejectAndAuditAsync(preparation,
                     preparation.Message ?? "The cleanup was rejected.");
             if (!Consume(preparation))
@@ -211,10 +211,19 @@ public sealed class TerminalOperationCoordinator
         _reservations.TryRemove(new KeyValuePair<Guid, Guid>(preparation.Request.TerminalId, preparation.ReservationToken));
     private void Release(CleanupPreparation preparation) =>
         _reservations.TryRemove(new KeyValuePair<Guid, Guid>(preparation.Request.TerminalId, preparation.ReservationToken));
-    private static CleanupPreparation Rejected(CleanupRequest request, TerminalRegistration terminal, string message) =>
-        Prepared(CleanupPreparationStatus.Rejected, request, false, message, terminal, Guid.Empty);
+    private CleanupPreparation IssueRejected(CleanupRequest request, TerminalRegistration terminal, string message)
+    {
+        var preparation = Prepared(CleanupPreparationStatus.Rejected, request, false, message, terminal, Guid.NewGuid());
+        _issuedRejections.TryAdd(preparation.ReservationToken, preparation);
+        return preparation;
+    }
+    private bool TryConsumeIssuedRejection(CleanupPreparation preparation) =>
+        _issuedRejections.TryGetValue(preparation.ReservationToken, out var issued) &&
+        issued == preparation &&
+        _issuedRejections.TryRemove(new KeyValuePair<Guid, CleanupPreparation>(preparation.ReservationToken, issued));
     private static CleanupPreparation Prepared(CleanupPreparationStatus status, CleanupRequest request, bool wasRunning,
-        string? message, TerminalRegistration terminal, Guid token) => new(status, request, wasRunning, message, terminal, token);
+        string? message, TerminalRegistration terminal, Guid token) =>
+        new(status, request, wasRunning, message, terminal, token);
     private static CleanupResult EmptyResult(bool wasRunning) => new(wasRunning, false, [], null);
     private async Task<TerminalRegistration?> FindTerminalAsync(Guid id, CancellationToken token) =>
         (await _registry.LoadAsync(token)).FirstOrDefault(terminal => terminal.Id == id);
