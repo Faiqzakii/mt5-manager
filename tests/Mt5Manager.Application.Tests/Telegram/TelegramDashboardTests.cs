@@ -8,6 +8,14 @@ public sealed class TelegramDashboardTests
     private static readonly Guid FirstId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
     [Fact]
+    public void Settings_and_ports_expose_enabled_remove_and_edit_contracts()
+    {
+        typeof(TelegramSettings).GetProperty(nameof(TelegramSettings.Enabled)).Should().NotBeNull();
+        typeof(ITelegramSettingsStore).GetMethod(nameof(ITelegramSettingsStore.RemoveAsync)).Should().NotBeNull();
+        typeof(ITelegramBotApi).GetMethod(nameof(ITelegramBotApi.EditMessageAsync)).Should().NotBeNull();
+    }
+
+    [Fact]
     public void Main_dashboard_has_indonesian_status_and_five_actions()
     {
         var message = TelegramDashboard.Main(new TelegramConnectionState(true, "operator", 3, null));
@@ -41,10 +49,11 @@ public sealed class TelegramDashboardTests
     [Fact]
     public void Confirmations_put_only_supplied_token_in_confirm_callbacks()
     {
-        var single = TelegramDashboard.ConfirmTerminal(false, new TelegramTerminal(FirstId, "Alpha", "12345", true), "S3");
+        var single = TelegramDashboard.ConfirmTerminal(false, true,
+            new TelegramTerminal(FirstId, "Alpha", "12345", true), "S3");
         var bulk = TelegramDashboard.ConfirmAll(true, 9, "B4");
 
-        single.Text.Should().Be("Nonaktifkan Algo Trading untuk Alpha — 12345?");
+        single.Text.Should().Be("Alpha — 12345\nStatus saat ini: ON\nStatus diminta: OFF\nLanjutkan?");
         single.Keyboard.Rows.SelectMany(x => x).Select(x => x.CallbackData).Should().Equal("confirm:S3", "cancel:S3");
         bulk.Text.Should().Be("Aktifkan Algo Trading untuk semua 9 terminal?");
         bulk.Keyboard.Rows.SelectMany(x => x).Select(x => x.CallbackData).Should().Equal("confirm:B4", "cancel:B4");
@@ -78,9 +87,9 @@ public sealed class TelegramDashboardTests
         var longError = new string('x', 4050);
         var results = new[]
         {
-            new TelegramTerminalResult(FirstId, "Alpha", "12345", true, true, null),
-            new TelegramTerminalResult(Guid.NewGuid(), "Beta", null, true, false, longError),
-            new TelegramTerminalResult(Guid.NewGuid(), "Gamma", "789", true, true, null)
+            new TelegramTerminalResult(FirstId, "Alpha", "12345", true, TelegramTerminalOutcome.Changed, null),
+            new TelegramTerminalResult(Guid.NewGuid(), "Beta", null, true, TelegramTerminalOutcome.Failed, longError),
+            new TelegramTerminalResult(Guid.NewGuid(), "Gamma", "789", true, TelegramTerminalOutcome.Changed, null)
         };
 
         var messages = TelegramDashboard.Results(results);
@@ -96,7 +105,7 @@ public sealed class TelegramDashboardTests
     public void Oversized_single_result_is_safely_split_to_telegram_limit()
     {
         var messages = TelegramDashboard.Results([
-            new TelegramTerminalResult(FirstId, "Alpha", "12345", false, false, new string('z', 9000))]);
+            new TelegramTerminalResult(FirstId, "Alpha", "12345", false, TelegramTerminalOutcome.Failed, new string('z', 9000))]);
 
         messages.Should().OnlyContain(x => x.Length <= TelegramDashboard.MaxMessageLength);
         string.Concat(messages).Should().Contain(new string('z', 9000));
@@ -108,7 +117,7 @@ public sealed class TelegramDashboardTests
         var error = string.Concat(Enumerable.Repeat("😀", 5000));
 
         var messages = TelegramDashboard.Results([
-            new TelegramTerminalResult(FirstId, "Alpha", null, false, false, error)]);
+            new TelegramTerminalResult(FirstId, "Alpha", null, false, TelegramTerminalOutcome.Failed, error)]);
 
         messages.Should().OnlyContain(message => message.Length <= TelegramDashboard.MaxMessageLength);
         messages.All(message => !char.IsHighSurrogate(message[message.Length - 1]) && !char.IsLowSurrogate(message[0])).Should().BeTrue();
@@ -120,8 +129,8 @@ public sealed class TelegramDashboardTests
     {
         var results = new[]
         {
-            new TelegramTerminalResult(FirstId, new string('a', 9000), null, false, false, "first"),
-            new TelegramTerminalResult(Guid.NewGuid(), new string('b', 9000), null, false, false, "second")
+            new TelegramTerminalResult(FirstId, new string('a', 9000), null, false, TelegramTerminalOutcome.Failed, "first"),
+            new TelegramTerminalResult(Guid.NewGuid(), new string('b', 9000), null, false, TelegramTerminalOutcome.Failed, "second")
         };
 
         var messages = TelegramDashboard.Results(results);
@@ -129,5 +138,40 @@ public sealed class TelegramDashboardTests
         messages.Should().OnlyContain(message => message.Length > 0 && message.Length <= TelegramDashboard.MaxMessageLength);
         messages.Count(message => message.StartsWith("❌ Gagal\n• ")).Should().Be(2);
         string.Concat(messages).Should().Contain("first").And.Contain("second");
+    }
+
+    [Fact]
+    public void Results_distinguish_changed_already_and_failed_and_header_follows_oversized_entry()
+    {
+        var results = new[]
+        {
+            new TelegramTerminalResult(FirstId, "Alpha", null, true, TelegramTerminalOutcome.Changed, null),
+            new TelegramTerminalResult(Guid.NewGuid(), new string('x', 9000), null, false, TelegramTerminalOutcome.AlreadyInRequestedState, null),
+            new TelegramTerminalResult(Guid.NewGuid(), "Short", null, false, TelegramTerminalOutcome.AlreadyInRequestedState, null),
+            new TelegramTerminalResult(Guid.NewGuid(), "Broken", null, true, TelegramTerminalOutcome.Failed, "boom")
+        };
+
+        var messages = TelegramDashboard.Results(results);
+
+        messages.Should().Contain(message => message.StartsWith("✅ Berhasil\n• Alpha"));
+        messages.Should().Contain(message => message.StartsWith("ℹ️ Sudah ON/OFF\n• "));
+        messages.Should().Contain(message => message == "ℹ️ Sudah ON/OFF\n• Short — akun tidak tersedia");
+        messages.Should().Contain(message => message.StartsWith("❌ Gagal\n• Broken"));
+    }
+
+    [Fact]
+    public void Same_section_oversized_short_oversized_preserves_every_result_with_headers()
+    {
+        var results = new[]
+        {
+            new TelegramTerminalResult(FirstId, new string('a', 9000), null, false, TelegramTerminalOutcome.Failed, "first"),
+            new TelegramTerminalResult(Guid.NewGuid(), "Short", null, false, TelegramTerminalOutcome.Failed, "middle"),
+            new TelegramTerminalResult(Guid.NewGuid(), new string('b', 9000), null, false, TelegramTerminalOutcome.Failed, "last")
+        };
+
+        var messages = TelegramDashboard.Results(results);
+
+        messages.Count(message => message.StartsWith("❌ Gagal\n• ")).Should().Be(3);
+        string.Concat(messages).Should().Contain("first").And.Contain("middle").And.Contain("last");
     }
 }

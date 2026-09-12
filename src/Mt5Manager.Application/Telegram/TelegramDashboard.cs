@@ -31,10 +31,12 @@ public static class TelegramDashboard
         return new TelegramMessage($"Pilih terminal untuk {action} Algo Trading:", new TelegramKeyboard(rows));
     }
 
-    public static TelegramMessage ConfirmTerminal(bool enable, TelegramTerminal terminal, string sessionToken)
+    public static TelegramMessage ConfirmTerminal(bool enable, bool currentlyEnabled, TelegramTerminal terminal, string sessionToken)
     {
         ArgumentNullException.ThrowIfNull(terminal);
-        return Confirmation($"{Action(enable)} Algo Trading untuk {Label(terminal)}?", sessionToken);
+        var current = currentlyEnabled ? "ON" : "OFF";
+        var requested = enable ? "ON" : "OFF";
+        return Confirmation($"{Label(terminal)}\nStatus saat ini: {current}\nStatus diminta: {requested}\nLanjutkan?", sessionToken);
     }
 
     public static TelegramMessage ConfirmAll(bool enable, int terminalCount, string sessionToken)
@@ -47,8 +49,9 @@ public static class TelegramDashboard
     {
         ArgumentNullException.ThrowIfNull(results);
         var sections = new List<(string Header, IReadOnlyList<string> Entries)>();
-        AddSection(sections, "✅ Berhasil", results.Where(x => x.Success).Select(ResultLine).ToArray());
-        AddSection(sections, "❌ Gagal", results.Where(x => !x.Success).Select(ResultLine).ToArray());
+        AddSection(sections, "✅ Berhasil", results.Where(x => x.Outcome == TelegramTerminalOutcome.Changed).Select(ResultLine).ToArray());
+        AddSection(sections, "ℹ️ Sudah ON/OFF", results.Where(x => x.Outcome == TelegramTerminalOutcome.AlreadyInRequestedState).Select(ResultLine).ToArray());
+        AddSection(sections, "❌ Gagal", results.Where(x => x.Outcome == TelegramTerminalOutcome.Failed).Select(ResultLine).ToArray());
         if (sections.Count == 0) return ["Tidak ada hasil operasi."];
 
         var messages = new List<string>();
@@ -68,15 +71,16 @@ public static class TelegramDashboard
                 continue;
             }
             if (current.Length > header.Length) messages.Add(current.ToString());
+            current.Clear().Append(header);
             if (header.Length + 1 + entry.Length <= MaxMessageLength)
             {
-                current.Clear().Append(header).Append('\n').Append(entry);
+                current.Append('\n').Append(entry);
                 continue;
             }
-            current.Clear();
             AppendOversized(messages, header, entry);
+            current.Clear().Append(header);
         }
-        if (current.Length > 0) messages.Add(current.ToString());
+        if (current.Length > header.Length) messages.Add(current.ToString());
     }
 
     private static void AppendOversized(List<string> messages, string header, string entry)
@@ -96,7 +100,7 @@ public static class TelegramDashboard
 
     private static string ResultLine(TelegramTerminalResult result)
     {
-        var suffix = result.Success || string.IsNullOrWhiteSpace(result.Error) ? "" : $": {result.Error}";
+        var suffix = result.Outcome != TelegramTerminalOutcome.Failed || string.IsNullOrWhiteSpace(result.Error) ? "" : $": {result.Error}";
         return $"• {result.TerminalName} — {Login(result.Login)}{suffix}";
     }
 

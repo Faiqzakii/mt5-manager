@@ -5,7 +5,8 @@ public sealed record ProtectedTelegramToken(string Value);
 public sealed record TelegramSettings(
     ProtectedTelegramToken BotToken,
     long AllowedChatId,
-    long UpdateOffset);
+    long UpdateOffset,
+    bool Enabled);
 
 public sealed record TelegramConnectionState(
     bool IsConnected,
@@ -15,12 +16,14 @@ public sealed record TelegramConnectionState(
 
 public sealed record TelegramTerminal(Guid Id, string Name, string? Login, bool IsAvailable);
 
+public enum TelegramTerminalOutcome { Changed, AlreadyInRequestedState, Failed }
+
 public sealed record TelegramTerminalResult(
     Guid TerminalId,
     string TerminalName,
     string? Login,
     bool Enable,
-    bool Success,
+    TelegramTerminalOutcome Outcome,
     string? Error);
 
 public sealed record TelegramButton(string Text, string CallbackData);
@@ -34,6 +37,7 @@ public interface ITelegramSettingsStore
 {
     Task<TelegramSettings?> LoadAsync(CancellationToken cancellationToken = default);
     Task SaveAsync(TelegramSettings settings, CancellationToken cancellationToken = default);
+    Task RemoveAsync(CancellationToken cancellationToken = default);
 }
 
 public interface ISecretProtector
@@ -47,5 +51,7 @@ public interface ITelegramBotApi
     Task<TelegramConnectionState> GetConnectionStateAsync(string botToken, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<TelegramUpdate>> GetUpdatesAsync(string botToken, long offset, CancellationToken cancellationToken = default);
     Task SendMessageAsync(string botToken, long chatId, TelegramMessage message, CancellationToken cancellationToken = default);
+    Task EditMessageAsync(string botToken, long chatId, long messageId, TelegramMessage message,
+        CancellationToken cancellationToken = default);
     Task AnswerCallbackAsync(string botToken, string callbackQueryId, string? text = null, CancellationToken cancellationToken = default);
 }
