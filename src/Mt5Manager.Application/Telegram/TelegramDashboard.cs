@@ -104,7 +104,8 @@ public static class TelegramDashboard
         return $"• {result.TerminalName} — {Login(result.Login)}{suffix}";
     }
 
-    private static string Label(TelegramTerminal terminal) => $"{terminal.Name} — {Login(terminal.Login)}";
+    private static string Label(TelegramTerminal terminal) =>
+        $"{terminal.Name} — {(terminal.IsAvailable ? Login(terminal.Login) : "akun tidak tersedia")}";
     private static string Login(string? login) => string.IsNullOrWhiteSpace(login) ? "akun tidak tersedia" : login;
     private static string Action(bool enable) => enable ? "Aktifkan" : "Nonaktifkan";
     private static TelegramButton Button(string text, string callbackData) => new(text, callbackData);

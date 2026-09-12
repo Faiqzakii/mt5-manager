@@ -47,6 +47,17 @@ public sealed class TelegramDashboardTests
     }
 
     [Fact]
+    public void Unavailable_terminal_never_displays_stale_login_as_available()
+    {
+        var terminal = new TelegramTerminal(FirstId, "Alpha", "stale-login", false);
+
+        var message = TelegramDashboard.TerminalPicker(true, [terminal], "opaque7");
+
+        message.Keyboard.Rows[0][0].Text.Should().Be("Alpha — akun tidak tersedia");
+        message.Keyboard.Rows[0][0].Text.Should().NotContain("stale-login");
+    }
+
+    [Fact]
     public void Confirmations_put_only_supplied_token_in_confirm_callbacks()
     {
         var single = TelegramDashboard.ConfirmTerminal(false, true,
