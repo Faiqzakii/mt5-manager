@@ -182,6 +182,32 @@ public sealed class TelegramBotServiceTests
         retry.Delay.Values.Take(3).Should().Equal(TimeSpan.FromSeconds(17), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2));
         await retry.Service.StopAsync(); retry.Service.State.Should().Be(TelegramBotState.Stopped);
     }
+    [Fact]
+    public async Task Stop_caller_cancellation_does_not_publish_stopped_while_poll_is_running()
+    {
+        await using var f = new Fixture(); f.Api.NonCooperativePoll = true;
+        await f.Service.StartAsync(); await f.Api.PollEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        using var caller = new CancellationTokenSource(); caller.Cancel();
+        var stop = () => f.Service.StopAsync(caller.Token);
+        await stop.Should().ThrowAsync<OperationCanceledException>();
+        f.Service.State.Should().Be(TelegramBotState.Running);
+        f.Api.ReleasePoll.TrySetResult();
+        await f.Service.StopAsync(); f.Service.State.Should().Be(TelegramBotState.Stopped);
+    }
+
+    [Fact]
+    public async Task Bulk_cancellation_stops_later_mutations_and_does_not_persist_update()
+    {
+        await using var f = new Fixture(); var first = f.AvailableTerminal("A"); f.AvailableTerminal("B");
+        var confirmation = await f.CreateConfirmationAsync("/onall");
+        f.Algo.CancelOnTerminal = first.Id;
+        var offset = f.Settings.Current.UpdateOffset;
+        f.Api.Updates.Enqueue([new(offset, null, new("go", 42, 1, confirmation))]);
+        await f.Service.StartAsync(); await f.Algo.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(2)); await f.Service.StopAsync();
+        f.Algo.Requests.Should().ContainSingle();
+        f.Settings.Current.UpdateOffset.Should().Be(offset);
+    }
+
 
     [Fact]
     public async Task ApplySettings_restarts_safely_and_lifecycle_never_has_two_pollers()
@@ -219,11 +245,11 @@ public sealed class TelegramBotServiceTests
     private sealed class Protector : ISecretProtector { public ProtectedTelegramToken Protect(string plaintext) => new(plaintext); public string Unprotect(ProtectedTelegramToken protectedValue) => "secret"; }
     private sealed class FakeApi : ITelegramBotApi
     {
-        private int concurrent; public int MaxConcurrentPolls; public Queue<IReadOnlyList<TelegramUpdate>> Updates { get; } = new(); public Queue<Exception> Errors { get; } = new();
+        private int concurrent; public int MaxConcurrentPolls; public bool NonCooperativePoll; public TaskCompletionSource PollEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource ReleasePoll { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously); public Queue<IReadOnlyList<TelegramUpdate>> Updates { get; } = new(); public Queue<Exception> Errors { get; } = new();
         public List<string> Calls { get; } = []; public List<long> Offsets { get; } = []; public List<(long ChatId, TelegramMessage Message)> Sent { get; } = []; public List<TelegramMessage> Edits { get; } = [];
         public bool ThrowOnEdit; public bool ThrowOnSend; public TelegramMessage LastDelivered => Edits.LastOrDefault() ?? Sent.Last().Message;
         public Task<TelegramConnectionState> GetConnectionStateAsync(string botToken, CancellationToken cancellationToken = default) { Calls.Add("connection"); return Task.FromResult(new TelegramConnectionState(true, "bot", 0, null)); }
-        public async Task<IReadOnlyList<TelegramUpdate>> GetUpdatesAsync(string botToken, long offset, CancellationToken cancellationToken = default) { Calls.Add("updates"); Offsets.Add(offset); var active = Interlocked.Increment(ref concurrent); MaxConcurrentPolls = Math.Max(MaxConcurrentPolls, active); try { if (Errors.TryDequeue(out var e)) throw e; if (Updates.TryDequeue(out var value)) return value; await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); return []; } finally { Interlocked.Decrement(ref concurrent); } }
+        public async Task<IReadOnlyList<TelegramUpdate>> GetUpdatesAsync(string botToken, long offset, CancellationToken cancellationToken = default) { Calls.Add("updates"); Offsets.Add(offset); var active = Interlocked.Increment(ref concurrent); MaxConcurrentPolls = Math.Max(MaxConcurrentPolls, active); try { if (NonCooperativePoll) { PollEntered.TrySetResult(); await ReleasePoll.Task; return []; } if (Errors.TryDequeue(out var e)) throw e; if (Updates.TryDequeue(out var value)) return value; await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); return []; } finally { Interlocked.Decrement(ref concurrent); } }
         public Task SendMessageAsync(string botToken, long chatId, TelegramMessage message, CancellationToken cancellationToken = default) { Calls.Add("send"); if (ThrowOnSend) throw new InvalidOperationException("send failed"); Sent.Add((chatId, message)); return Task.CompletedTask; }
         public Task EditMessageAsync(string botToken, long chatId, long messageId, TelegramMessage message, CancellationToken cancellationToken = default) { Calls.Add("edit"); Edits.Add(message); if (ThrowOnEdit) throw new InvalidOperationException("edit failed"); return Task.CompletedTask; }
         public Task AnswerCallbackAsync(string botToken, string callbackQueryId, string? text = null, CancellationToken cancellationToken = default) { Calls.Add($"answer:{callbackQueryId}"); return Task.CompletedTask; }
@@ -232,8 +258,8 @@ public sealed class TelegramBotServiceTests
     private sealed class FakeRuntime : ITerminalRuntimeInspector { public Dictionary<Guid, TerminalAccountSnapshot> Snapshots { get; } = []; public Dictionary<Guid, Queue<TerminalAccountSnapshot?>> Sequences { get; } = []; public int ReadCount; public Task<TerminalAccountSnapshot?> ReadAsync(TerminalRegistration terminal, CancellationToken cancellationToken = default) { ReadCount++; return Task.FromResult(Sequences.TryGetValue(terminal.Id, out var sequence) && sequence.TryDequeue(out var value) ? value : Snapshots.GetValueOrDefault(terminal.Id)); } }
     private sealed class FakeAlgo : IAlgoTradingService
     {
-        private int concurrent; public int MaxConcurrent; public Action? OnSet; public List<AlgoTradingRequest> Requests { get; } = []; public Queue<AlgoTradingOperationResult> Results { get; } = new(); public Queue<Exception?> Errors { get; } = new();
-        public Task<AlgoTradingOperationResult> SetAsync(AlgoTradingRequest request, CancellationToken cancellationToken = default) { var active = Interlocked.Increment(ref concurrent); MaxConcurrent = Math.Max(MaxConcurrent, active); try { Requests.Add(request); OnSet?.Invoke(); return Complete(); } finally { Interlocked.Decrement(ref concurrent); } Task<AlgoTradingOperationResult> Complete() { if (Errors.TryDequeue(out var error) && error is not null) throw error; return Task.FromResult(Results.TryDequeue(out var result) ? result : new(request.TerminalId, "Terminal", request.Enable, new(true, "changed", null))); } }
+        private int concurrent; public int MaxConcurrent; public Action? OnSet; public Guid? CancelOnTerminal; public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously); public List<AlgoTradingRequest> Requests { get; } = []; public Queue<AlgoTradingOperationResult> Results { get; } = new(); public Queue<Exception?> Errors { get; } = new();
+        public async Task<AlgoTradingOperationResult> SetAsync(AlgoTradingRequest request, CancellationToken cancellationToken = default) { var active = Interlocked.Increment(ref concurrent); MaxConcurrent = Math.Max(MaxConcurrent, active); try { Requests.Add(request); OnSet?.Invoke(); if (CancelOnTerminal == request.TerminalId) { Cancelled.TrySetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); } if (Errors.TryDequeue(out var error) && error is not null) throw error; return Results.TryDequeue(out var result) ? result : new(request.TerminalId, "Terminal", request.Enable, new(true, "changed", null)); } finally { Interlocked.Decrement(ref concurrent); } }
     }
     private sealed class FakeTimeProvider : TimeProvider { private DateTimeOffset now = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero); public override DateTimeOffset GetUtcNow() => now; public void Advance(TimeSpan value) => now += value; }
     private sealed class FakeDelay : IDelay { public List<TimeSpan> Values { get; } = []; public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken) { Values.Add(delay); return Task.CompletedTask; } public async Task WaitCountAsync(int count) { var until = DateTime.UtcNow.AddSeconds(2); while (Values.Count < count && DateTime.UtcNow < until) await Task.Delay(5); Values.Count.Should().BeGreaterThanOrEqualTo(count); } }

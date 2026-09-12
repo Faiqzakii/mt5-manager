@@ -38,6 +38,9 @@ public sealed class TelegramBotService : ITelegramBotService
         try
         {
             if (pollingTask is { IsCompleted: false }) return;
+            pollingCancellation?.Dispose();
+            pollingCancellation = null;
+            pollingTask = null;
             settings = await settingsStore.LoadAsync(cancellationToken).ConfigureAwait(false);
             if (settings is null || !settings.Enabled) return;
             token = protector.Unprotect(settings.BotToken);
@@ -51,11 +54,18 @@ public sealed class TelegramBotService : ITelegramBotService
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         Task? task;
+        CancellationTokenSource? source;
         await lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try { pollingCancellation?.Cancel(); task = pollingTask; }
+        try { source = pollingCancellation; source?.Cancel(); task = pollingTask; }
         finally { lifecycle.Release(); }
-        if (task is not null) try { await task.WaitAsync(cancellationToken).ConfigureAwait(false); } catch (OperationCanceledException) { }
-        SetState(TelegramBotState.Stopped);
+        if (task is not null) await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (ReferenceEquals(pollingTask, task)) { pollingTask = null; pollingCancellation = null; source?.Dispose(); }
+            SetState(TelegramBotState.Stopped);
+        }
+        finally { lifecycle.Release(); }
     }
 
     public async Task ApplySettingsAsync(CancellationToken cancellationToken = default)
@@ -174,6 +184,7 @@ public sealed class TelegramBotService : ITelegramBotService
                 var already = operation.Result.Success && operation.Result.Message.Contains("already", StringComparison.OrdinalIgnoreCase);
                 results.Add(new(id, registration.DisplayName, snapshot.Login.ToString(), enable, operation.Result.Success ? (already ? TelegramTerminalOutcome.AlreadyInRequestedState : TelegramTerminalOutcome.Changed) : TelegramTerminalOutcome.Failed, operation.Result.Success ? null : operation.Result.Message));
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception error) { results.Add(new(id, registration.DisplayName, snapshot.Login.ToString(), enable, TelegramTerminalOutcome.Failed, error.Message)); }
         }
         foreach (var text in TelegramDashboard.Results(results)) await api.SendMessageAsync(token!, chatId, new(text, new([])), ct).ConfigureAwait(false);
