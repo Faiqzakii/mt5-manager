@@ -1,4 +1,8 @@
+using System.Runtime.CompilerServices;
 using System.Windows;
+
+[assembly: InternalsVisibleTo("Mt5Manager.Wpf.Tests")]
+
 
 [assembly:ThemeInfo(
     ResourceDictionaryLocation.None,            //where theme specific resource dictionaries are located
