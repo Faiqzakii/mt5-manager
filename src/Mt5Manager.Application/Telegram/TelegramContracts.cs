@@ -1,0 +1,51 @@
+namespace Mt5Manager.Application.Telegram;
+
+public sealed record ProtectedTelegramToken(string Value);
+
+public sealed record TelegramSettings(
+    ProtectedTelegramToken BotToken,
+    long AllowedChatId,
+    long UpdateOffset);
+
+public sealed record TelegramConnectionState(
+    bool IsConnected,
+    string? BotUsername,
+    int TerminalCount,
+    string? Error);
+
+public sealed record TelegramTerminal(Guid Id, string Name, string? Login, bool IsAvailable);
+
+public sealed record TelegramTerminalResult(
+    Guid TerminalId,
+    string TerminalName,
+    string? Login,
+    bool Enable,
+    bool Success,
+    string? Error);
+
+public sealed record TelegramButton(string Text, string CallbackData);
+public sealed record TelegramKeyboard(IReadOnlyList<IReadOnlyList<TelegramButton>> Rows);
+public sealed record TelegramMessage(string Text, TelegramKeyboard Keyboard);
+public sealed record TelegramIncomingMessage(long ChatId, long MessageId, string? Text);
+public sealed record TelegramCallbackQuery(string Id, long ChatId, long MessageId, string Data);
+public sealed record TelegramUpdate(long UpdateId, TelegramIncomingMessage? Message, TelegramCallbackQuery? CallbackQuery);
+
+public interface ITelegramSettingsStore
+{
+    Task<TelegramSettings?> LoadAsync(CancellationToken cancellationToken = default);
+    Task SaveAsync(TelegramSettings settings, CancellationToken cancellationToken = default);
+}
+
+public interface ISecretProtector
+{
+    ProtectedTelegramToken Protect(string plaintext);
+    string Unprotect(ProtectedTelegramToken protectedValue);
+}
+
+public interface ITelegramBotApi
+{
+    Task<TelegramConnectionState> GetConnectionStateAsync(string botToken, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<TelegramUpdate>> GetUpdatesAsync(string botToken, long offset, CancellationToken cancellationToken = default);
+    Task SendMessageAsync(string botToken, long chatId, TelegramMessage message, CancellationToken cancellationToken = default);
+    Task AnswerCallbackAsync(string botToken, string callbackQueryId, string? text = null, CancellationToken cancellationToken = default);
+}
