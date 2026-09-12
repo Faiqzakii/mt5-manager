@@ -25,7 +25,7 @@ public sealed class AppCompositionTests
         services.Should().ContainSingle(x => x.ServiceType == typeof(ITelegramBotApi) &&
             x.Lifetime == ServiceLifetime.Singleton);
         services.Should().ContainSingle(x => x.ServiceType == typeof(ITelegramBotService) &&
-            x.ImplementationType == typeof(TelegramBotService) && x.Lifetime == ServiceLifetime.Singleton);
+            x.ImplementationFactory != null && x.Lifetime == ServiceLifetime.Singleton);
         services.Should().ContainSingle(x => x.ServiceType == typeof(TelegramSettingsViewModel) &&
             x.Lifetime == ServiceLifetime.Transient);
         services.Should().ContainSingle(x => x.ServiceType == typeof(TelegramSettingsDialog) &&
@@ -42,6 +42,33 @@ public sealed class AppCompositionTests
         await lifetime.StopAsync();
 
         bot.Events.Should().Equal("start", "stop-cancelled");
+    }
+
+    [Fact]
+    public async Task BoundedBotService_DisposeDoesNotWaitForeverForNonCooperativeInnerService()
+    {
+        var inner = new NonCooperativeBotService();
+        var service = new BoundedTelegramBotService(inner, TimeSpan.FromMilliseconds(25));
+
+        var disposal = service.DisposeAsync().AsTask();
+
+        await disposal.WaitAsync(TimeSpan.FromSeconds(1));
+        inner.DisposeStarted.Should().BeTrue();
+    }
+
+    sealed class NonCooperativeBotService : ITelegramBotService
+    {
+        public bool DisposeStarted { get; private set; }
+        public TelegramBotState State => TelegramBotState.Stopped;
+        public event EventHandler? StateChanged { add { } remove { } }
+        public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task ApplySettingsAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public ValueTask DisposeAsync()
+        {
+            DisposeStarted = true;
+            return new ValueTask(Task.Delay(Timeout.InfiniteTimeSpan));
+        }
     }
 
     sealed class RecordingBotService : ITelegramBotService

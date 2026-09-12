@@ -81,7 +81,12 @@ public partial class App : System.Windows.Application
         services.AddSingleton<ITelegramBotApi>(sp => new TelegramBotApiClient(sp.GetRequiredService<HttpClient>()));
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<IDelay, SystemDelay>();
-        services.AddSingleton<ITelegramBotService, TelegramBotService>();
+        services.AddSingleton<ITelegramBotService>(sp => new BoundedTelegramBotService(
+            new TelegramBotService(sp.GetRequiredService<ITelegramSettingsStore>(),
+                sp.GetRequiredService<ISecretProtector>(), sp.GetRequiredService<ITelegramBotApi>(),
+                sp.GetRequiredService<ITerminalRegistry>(), sp.GetRequiredService<ITerminalRuntimeInspector>(),
+                sp.GetRequiredService<IAlgoTradingService>(), sp.GetRequiredService<TimeProvider>(),
+                sp.GetRequiredService<IDelay>()), ShutdownTimeout));
         services.AddSingleton(sp => new TelegramApplicationLifetime(
             sp.GetRequiredService<ITelegramBotService>(), ShutdownTimeout));
         services.AddTransient<TelegramSettingsViewModel>();
@@ -142,5 +147,35 @@ public sealed class TelegramApplicationLifetime
         CancelOperations();
         using var timeout = new CancellationTokenSource(shutdownTimeout);
         await botService.StopAsync(timeout.Token).ConfigureAwait(false);
+    }
+}
+
+public sealed class BoundedTelegramBotService : ITelegramBotService
+{
+    readonly ITelegramBotService inner;
+    readonly TimeSpan shutdownTimeout;
+
+    internal BoundedTelegramBotService(ITelegramBotService inner, TimeSpan shutdownTimeout)
+    {
+        this.inner = inner;
+        this.shutdownTimeout = shutdownTimeout;
+    }
+
+    public TelegramBotState State => inner.State;
+    public event EventHandler? StateChanged
+    {
+        add => inner.StateChanged += value;
+        remove => inner.StateChanged -= value;
+    }
+
+    public Task StartAsync(CancellationToken cancellationToken = default) => inner.StartAsync(cancellationToken);
+    public Task StopAsync(CancellationToken cancellationToken = default) => inner.StopAsync(cancellationToken);
+    public Task ApplySettingsAsync(CancellationToken cancellationToken = default) => inner.ApplySettingsAsync(cancellationToken);
+
+    public async ValueTask DisposeAsync()
+    {
+        var disposal = inner.DisposeAsync().AsTask();
+        try { await disposal.WaitAsync(shutdownTimeout).ConfigureAwait(false); }
+        catch (TimeoutException) { }
     }
 }
