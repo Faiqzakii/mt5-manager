@@ -27,7 +27,7 @@ public static class TelegramDashboard
         var action = enable ? "mengaktifkan" : "menonaktifkan";
         var operation = enable ? "on" : "off";
         var rows = terminals.Select(terminal => (IReadOnlyList<TelegramButton>)[
-            Button(Label(terminal), $"terminal:{operation}:{terminal.Id:N}:{sessionToken}")]).ToArray();
+            Button(Label(terminal), Callback($"terminal:{operation}:{terminal.Id:N}:{sessionToken}"))]).ToArray();
         return new TelegramMessage($"Pilih terminal untuk {action} Algo Trading:", new TelegramKeyboard(rows));
     }
 
@@ -67,7 +67,7 @@ public static class TelegramDashboard
                 current.Append('\n').Append(entry);
                 continue;
             }
-            messages.Add(current.ToString());
+            if (current.Length > header.Length) messages.Add(current.ToString());
             if (header.Length + 1 + entry.Length <= MaxMessageLength)
             {
                 current.Clear().Append(header).Append('\n').Append(entry);
@@ -81,15 +81,17 @@ public static class TelegramDashboard
 
     private static void AppendOversized(List<string> messages, string header, string entry)
     {
-        var firstCapacity = MaxMessageLength - header.Length - 1;
-        messages.Add(header + "\n" + entry[..firstCapacity]);
-        var offset = firstCapacity;
-        while (entry.Length - offset > MaxMessageLength)
+        var prefix = header + "\n";
+        var offset = 0;
+        while (offset < entry.Length)
         {
-            messages.Add(entry.Substring(offset, MaxMessageLength));
-            offset += MaxMessageLength;
+            var capacity = offset == 0 ? MaxMessageLength - prefix.Length : MaxMessageLength;
+            var length = Math.Min(capacity, entry.Length - offset);
+            if (length < entry.Length - offset && char.IsHighSurrogate(entry[offset + length - 1])) length--;
+            var chunk = entry.Substring(offset, length);
+            messages.Add(offset == 0 ? prefix + chunk : chunk);
+            offset += length;
         }
-        if (offset < entry.Length) messages.Add(entry[offset..]);
     }
 
     private static string ResultLine(TelegramTerminalResult result)
@@ -108,7 +110,14 @@ public static class TelegramDashboard
     {
         ValidateToken(sessionToken);
         return new TelegramMessage(text, Keyboard([
-            Button("Ya", $"confirm:{sessionToken}"), Button("Batal", $"cancel:{sessionToken}")]));
+            Button("Ya", Callback($"confirm:{sessionToken}")), Button("Batal", Callback($"cancel:{sessionToken}"))]));
+    }
+
+    private static string Callback(string value)
+    {
+        if (Encoding.UTF8.GetByteCount(value) > 64)
+            throw new ArgumentException("Telegram callback data cannot exceed 64 UTF-8 bytes.", nameof(value));
+        return value;
     }
 
     private static void ValidateToken(string token)

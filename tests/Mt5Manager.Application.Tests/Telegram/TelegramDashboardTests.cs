@@ -51,6 +51,28 @@ public sealed class TelegramDashboardTests
     }
 
     [Fact]
+    public void Picker_accepts_exact_OFF_callback_byte_limit_and_rejects_one_byte_over()
+    {
+        var terminal = new TelegramTerminal(FirstId, "Alpha", null, true);
+
+        var message = TelegramDashboard.TerminalPicker(false, [terminal], new string('a', 18));
+
+        System.Text.Encoding.UTF8.GetByteCount(message.Keyboard.Rows[0][0].CallbackData).Should().Be(64);
+        var act = () => TelegramDashboard.TerminalPicker(false, [terminal], new string('a', 19));
+        act.Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
+    public void Picker_rejects_multibyte_token_when_complete_callback_exceeds_byte_limit()
+    {
+        var terminal = new TelegramTerminal(FirstId, "Alpha", null, true);
+
+        var act = () => TelegramDashboard.TerminalPicker(true, [terminal], new string('界', 7));
+
+        act.Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
     public void Results_are_grouped_by_outcome_and_split_only_between_terminal_entries()
     {
         var longError = new string('x', 4050);
@@ -78,5 +100,34 @@ public sealed class TelegramDashboardTests
 
         messages.Should().OnlyContain(x => x.Length <= TelegramDashboard.MaxMessageLength);
         string.Concat(messages).Should().Contain(new string('z', 9000));
+    }
+
+    [Fact]
+    public void Oversized_result_never_splits_a_supplementary_character_at_any_cutoff()
+    {
+        var error = string.Concat(Enumerable.Repeat("😀", 5000));
+
+        var messages = TelegramDashboard.Results([
+            new TelegramTerminalResult(FirstId, "Alpha", null, false, false, error)]);
+
+        messages.Should().OnlyContain(message => message.Length <= TelegramDashboard.MaxMessageLength);
+        messages.All(message => !char.IsHighSurrogate(message[message.Length - 1]) && !char.IsLowSurrogate(message[0])).Should().BeTrue();
+        string.Concat(messages).Count(character => char.IsHighSurrogate(character)).Should().Be(5000);
+    }
+
+    [Fact]
+    public void Consecutive_oversized_results_have_no_empty_messages_and_keep_section_semantics()
+    {
+        var results = new[]
+        {
+            new TelegramTerminalResult(FirstId, new string('a', 9000), null, false, false, "first"),
+            new TelegramTerminalResult(Guid.NewGuid(), new string('b', 9000), null, false, false, "second")
+        };
+
+        var messages = TelegramDashboard.Results(results);
+
+        messages.Should().OnlyContain(message => message.Length > 0 && message.Length <= TelegramDashboard.MaxMessageLength);
+        messages.Count(message => message.StartsWith("❌ Gagal\n• ")).Should().Be(2);
+        string.Concat(messages).Should().Contain("first").And.Contain("second");
     }
 }
