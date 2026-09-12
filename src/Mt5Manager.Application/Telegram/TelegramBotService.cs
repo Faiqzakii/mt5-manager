@@ -128,8 +128,8 @@ public sealed class TelegramBotService : ITelegramBotService
         if (parts.Length == 2 && parts[0] == "all") { await BeginAllAsync(callback.ChatId, callback.MessageId, parts[1] == "on", true, cancellationToken); return; }
         if (parts.Length == 4 && parts[0] == "terminal" && Guid.TryParseExact(parts[2], "N", out var id))
         {
-            if (!Take(parts[3], callback.ChatId, out var picker) || picker.TerminalIds is null || !picker.TerminalIds.Contains(id)) { await InvalidAsync(callback, cancellationToken); return; }
-            await BeginConfirmationAsync(callback.ChatId, callback.MessageId, parts[1] == "on", [id], cancellationToken); return;
+            if (!Take(parts[3], callback.ChatId, out var picker) || picker.TerminalIds is null || !picker.TerminalIds.Contains(id) || picker.Enable != (parts[1] == "on")) { await InvalidAsync(callback, cancellationToken); return; }
+            await BeginConfirmationAsync(callback.ChatId, callback.MessageId, picker.Enable, [id], cancellationToken); return;
         }
         if (parts.Length == 2 && parts[0] == "cancel") { Take(parts[1], callback.ChatId, out _); return; }
         if (parts.Length == 2 && parts[0] == "confirm")
@@ -152,10 +152,11 @@ public sealed class TelegramBotService : ITelegramBotService
     }
     private async Task BeginConfirmationAsync(long chatId, long messageId, bool enable, Guid[] ids, CancellationToken ct)
     {
-        var terminals = await LoadTerminalsAsync(ct).ConfigureAwait(false); var terminal = terminals.FirstOrDefault(x => x.Id == ids[0]);
-        if (terminal is null || !terminal.IsAvailable) { await DeliverAsync(chatId, messageId, new TelegramMessage("Terminal tidak tersedia.", new([])), true, ct); return; }
-        var snapshot = (await FreshAsync(ids[0], ct).ConfigureAwait(false)).Snapshot;
-        var key = Store(chatId, enable, ids); await DeliverAsync(chatId, messageId, TelegramDashboard.ConfirmTerminal(enable, snapshot?.GlobalAlgoTrading == AlgoTradingState.Enabled, terminal, key), true, ct).ConfigureAwait(false);
+        var (registration, snapshot) = await FreshAsync(ids[0], ct).ConfigureAwait(false);
+        if (registration is null || snapshot is null) { await DeliverAsync(chatId, messageId, new TelegramMessage("Terminal tidak tersedia.", new([])), true, ct); return; }
+        var terminal = new TelegramTerminal(registration.Id, registration.DisplayName, snapshot.Login.ToString(), true);
+        var key = Store(chatId, enable, ids);
+        await DeliverAsync(chatId, messageId, TelegramDashboard.ConfirmTerminal(enable, snapshot.GlobalAlgoTrading == AlgoTradingState.Enabled, terminal, key), true, ct).ConfigureAwait(false);
     }
 
     private async Task ExecuteAsync(long chatId, bool enable, Guid[] ids, CancellationToken ct)
@@ -192,7 +193,7 @@ public sealed class TelegramBotService : ITelegramBotService
     { if (edit) try { await api.EditMessageAsync(token!, chatId, messageId, message, ct).ConfigureAwait(false); return; } catch { } await api.SendMessageAsync(token!, chatId, message, ct).ConfigureAwait(false); }
     private Task InvalidAsync(TelegramCallbackQuery callback, CancellationToken ct) => api.SendMessageAsync(token!, callback.ChatId, new("Konfirmasi tidak valid atau kedaluwarsa.", new([])), ct);
     private string Store(long chat, bool enable, Guid[] ids) { var key = Convert.ToHexString(RandomNumberGenerator.GetBytes(9)).ToLowerInvariant(); confirmations[key] = new(chat, enable, [.. ids], clock.GetUtcNow().AddMinutes(2)); return key; }
-    private bool Take(string key, long chat, out Confirmation value) { if (confirmations.Remove(key, out value!) && value.ChatId == chat && value.ExpiresAt > clock.GetUtcNow()) return true; value = null!; return false; }
+    private bool Take(string key, long chat, out Confirmation value) { if (confirmations.TryGetValue(key, out value!) && value.ChatId == chat && value.ExpiresAt > clock.GetUtcNow() && confirmations.Remove(key)) return true; value = null!; return false; }
     private void SetState(TelegramBotState value) { if (State == value) return; State = value; StateChanged?.Invoke(this, EventArgs.Empty); }
     private static (TelegramBotErrorKind Kind, TimeSpan? RetryAfter) Classify(Exception error) =>
         error is ITelegramBotApiError known

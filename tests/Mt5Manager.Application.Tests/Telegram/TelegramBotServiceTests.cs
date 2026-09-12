@@ -82,6 +82,40 @@ public sealed class TelegramBotServiceTests
     }
 
     [Fact]
+    public async Task Tampered_picker_action_is_rejected_without_confirmation_or_mutation()
+    {
+        await using var f = new Fixture(); f.AvailableTerminal();
+        var picker = await f.CreatePickerAsync("/on");
+        await f.SendCallbacksAsync(new TelegramCallbackQuery("tampered", 42, 9, picker.Replace("terminal:on:", "terminal:off:")));
+        f.Api.LastDelivered.Text.Should().Contain("tidak valid");
+        f.Algo.Requests.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Individual_confirmation_uses_one_fresh_snapshot_and_suppresses_stale_data()
+    {
+        await using var f = new Fixture(); var terminal = f.AvailableTerminal();
+        var picker = await f.CreatePickerAsync("/on");
+        f.Runtime.Sequences[terminal.Id] = new Queue<TerminalAccountSnapshot?>([f.Snapshot(), null]);
+        await f.SendCallbacksAsync(new TelegramCallbackQuery("pick", 42, 9, picker));
+        f.Runtime.Sequences[terminal.Id].Should().ContainSingle().Which.Should().BeNull();
+        f.Api.LastDelivered.Text.Should().Contain("Status saat ini");
+        f.Api.LastDelivered.Text.Should().Contain("123456");
+        f.Algo.Requests.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Wrong_chat_does_not_consume_confirmation_owned_by_allowed_chat()
+    {
+        await using var f = new Fixture(); var terminal = f.AvailableTerminal();
+        var confirmation = await f.CreateConfirmationAsync("/onall");
+        await f.SendCallbacksAsync(
+            new("attacker", 99, 9, confirmation),
+            new("owner", 42, 9, confirmation));
+        f.Algo.Requests.Should().ContainSingle(x => x.TerminalId == terminal.Id);
+    }
+
+    [Fact]
     public async Task Unavailable_terminal_suppresses_stale_account_and_never_mutates()
     {
         await using var f = new Fixture(); var terminal = f.Registration(); f.Registry.Items.Add(terminal);
@@ -195,7 +229,7 @@ public sealed class TelegramBotServiceTests
         public Task AnswerCallbackAsync(string botToken, string callbackQueryId, string? text = null, CancellationToken cancellationToken = default) { Calls.Add($"answer:{callbackQueryId}"); return Task.CompletedTask; }
     }
     private sealed class FakeRegistry : ITerminalRegistry { public List<TerminalRegistration> Items { get; } = []; public int LoadCount; public Task<IReadOnlyList<TerminalRegistration>> LoadAsync(CancellationToken cancellationToken = default) { LoadCount++; return Task.FromResult<IReadOnlyList<TerminalRegistration>>([.. Items]); } public Task SaveAsync(IReadOnlyList<TerminalRegistration> terminals, CancellationToken cancellationToken = default) => Task.CompletedTask; }
-    private sealed class FakeRuntime : ITerminalRuntimeInspector { public Dictionary<Guid, TerminalAccountSnapshot> Snapshots { get; } = []; public int ReadCount; public Task<TerminalAccountSnapshot?> ReadAsync(TerminalRegistration terminal, CancellationToken cancellationToken = default) { ReadCount++; return Task.FromResult(Snapshots.GetValueOrDefault(terminal.Id)); } }
+    private sealed class FakeRuntime : ITerminalRuntimeInspector { public Dictionary<Guid, TerminalAccountSnapshot> Snapshots { get; } = []; public Dictionary<Guid, Queue<TerminalAccountSnapshot?>> Sequences { get; } = []; public int ReadCount; public Task<TerminalAccountSnapshot?> ReadAsync(TerminalRegistration terminal, CancellationToken cancellationToken = default) { ReadCount++; return Task.FromResult(Sequences.TryGetValue(terminal.Id, out var sequence) && sequence.TryDequeue(out var value) ? value : Snapshots.GetValueOrDefault(terminal.Id)); } }
     private sealed class FakeAlgo : IAlgoTradingService
     {
         private int concurrent; public int MaxConcurrent; public Action? OnSet; public List<AlgoTradingRequest> Requests { get; } = []; public Queue<AlgoTradingOperationResult> Results { get; } = new(); public Queue<Exception?> Errors { get; } = new();
