@@ -127,25 +127,28 @@ public sealed partial class TelegramSettingsViewModel(
         }
     }
 
-    public async Task RemoveConfirmedAsync(CancellationToken cancellationToken = default)
+    public async Task<bool> RemoveConfirmedAsync(CancellationToken cancellationToken = default)
     {
-        if (IsBusy) return;
+        if (IsBusy) return false;
         try
         {
             IsBusy = true;
             ValidationMessage = null;
             await store.RemoveAsync(cancellationToken);
-            ClearEditor();
             await botService.ApplySettingsAsync(cancellationToken);
+            ClearEditor();
             Status = "Telegram bot configuration removed.";
+            return true;
         }
         catch (OperationCanceledException)
         {
+            return false;
         }
         catch
         {
             ValidationMessage = "Unable to remove Telegram bot configuration.";
             Status = "Removal failed. The token remains hidden.";
+            return false;
         }
         finally
         {

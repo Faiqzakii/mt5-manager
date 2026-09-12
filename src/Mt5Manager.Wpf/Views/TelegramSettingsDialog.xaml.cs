@@ -46,8 +46,7 @@ public partial class TelegramSettingsDialog : Window
             "Remove Telegram configuration", MessageBoxButton.YesNo, MessageBoxImage.Warning,
             MessageBoxResult.No) == MessageBoxResult.Yes;
         if (!confirmed) return;
-        await viewModel.RemoveConfirmedAsync();
-        TokenBox.Clear();
+        if (await viewModel.RemoveConfirmedAsync()) TokenBox.Clear();
     }
 
     void Window_Closing(object? sender, CancelEventArgs e)

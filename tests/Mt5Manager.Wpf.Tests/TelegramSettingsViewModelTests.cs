@@ -136,6 +136,28 @@ public sealed class TelegramSettingsViewModelTests
         fixture.ViewModel.Enabled.Should().BeFalse();
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Failed_remove_preserves_editor_secret_for_retry(bool storeFails)
+    {
+        var fixture = new Fixture();
+        fixture.ViewModel.Enabled = true;
+        fixture.ViewModel.BotToken = Token;
+        fixture.ViewModel.AllowedChatId = "42";
+        if (storeFails) fixture.Store.RemoveException = new InvalidOperationException($"failed {Token}");
+        else fixture.Bot.ApplyException = new InvalidOperationException($"failed {Token}");
+
+        var removed = await fixture.ViewModel.RemoveConfirmedAsync();
+
+        removed.Should().BeFalse();
+        fixture.ViewModel.BotToken.Should().Be(Token);
+        fixture.ViewModel.AllowedChatId.Should().Be("42");
+        fixture.ViewModel.Enabled.Should().BeTrue();
+        fixture.ViewModel.Status.Should().NotContain(Token);
+        fixture.ViewModel.ValidationMessage.Should().NotContain(Token);
+    }
+
     [Fact]
     public async Task Cancellation_does_not_surface_an_error_and_busy_disables_mutation()
     {
@@ -179,9 +201,10 @@ public sealed class TelegramSettingsViewModelTests
     {
         public List<string> Events { get; } = [];
         public TelegramSettings? Saved { get; private set; }
+        public Exception? RemoveException { get; set; }
         public Task<TelegramSettings?> LoadAsync(CancellationToken cancellationToken = default) => Task.FromResult(loaded);
         public Task SaveAsync(TelegramSettings settings, CancellationToken cancellationToken = default) { Events.Add("save"); timeline.Add("save"); Saved = settings; return Task.CompletedTask; }
-        public Task RemoveAsync(CancellationToken cancellationToken = default) { Events.Add("remove"); timeline.Add("remove"); return Task.CompletedTask; }
+        public Task RemoveAsync(CancellationToken cancellationToken = default) { Events.Add("remove"); timeline.Add("remove"); return RemoveException is null ? Task.CompletedTask : Task.FromException(RemoveException); }
     }
 
     sealed class Protector(List<string> timeline) : ISecretProtector
@@ -214,10 +237,11 @@ public sealed class TelegramSettingsViewModelTests
         public TelegramBotState State => TelegramBotState.Stopped;
         public event EventHandler? StateChanged;
         public List<string> Events { get; } = [];
+        public Exception? ApplyException { get; set; }
         public int StartCalls { get; private set; }
         public Task StartAsync(CancellationToken cancellationToken = default) { StartCalls++; Events.Add("start"); return Task.CompletedTask; }
         public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task ApplySettingsAsync(CancellationToken cancellationToken = default) { Events.Add("apply"); timeline.Add("apply"); return Task.CompletedTask; }
+        public Task ApplySettingsAsync(CancellationToken cancellationToken = default) { Events.Add("apply"); timeline.Add("apply"); return ApplyException is null ? Task.CompletedTask : Task.FromException(ApplyException); }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }
