@@ -30,6 +30,7 @@ public sealed class WindowsTerminalAlgoTradingControllerTests
         result.Success.Should().BeTrue();
         result.Message.Should().Be("Algo Trading is already enabled.");
         input.Sent.Should().BeEmpty();
+        input.Minimized.Should().BeEmpty("an unchanged terminal state must not be minimized");
     }
 
     [Fact]
@@ -75,6 +76,9 @@ public sealed class WindowsTerminalAlgoTradingControllerTests
 
         result.Success.Should().BeTrue();
         input.LeaseDisposed.Should().BeTrue("focus must be restored after confirmation completes");
+        input.Minimized.Should().Equal([4242]);
+        input.LeaseDisposalOrder.Should().Equal(["Minimized", "Disposed"],
+            "the terminal must be minimized before focus is returned");
     }
     [Fact]
     public async Task Set_fails_when_observed_state_does_not_change()
@@ -87,6 +91,7 @@ public sealed class WindowsTerminalAlgoTradingControllerTests
         result.Success.Should().BeFalse();
         result.Message.Should().Be("Algo Trading did not become enabled.");
         input.Sent.Should().Equal([(4242, true)]);
+        input.Minimized.Should().BeEmpty("an unconfirmed state change must not minimize the terminal");
     }
 
     [Fact]
@@ -117,18 +122,28 @@ public sealed class WindowsTerminalAlgoTradingControllerTests
     private sealed class FakeInput : IAlgoTradingInput
     {
         public List<(nint Window, bool Sent)> Sent { get; } = [];
+        public List<nint> Minimized { get; } = [];
+        public List<string> LeaseDisposalOrder { get; } = [];
         public bool LeaseDisposed { get; private set; }
-        public bool TryAcquire(nint window, out IDisposable? lease)
+        public bool TryAcquire(nint window, out IAlgoTradingLease? lease)
         {
             Sent.Add((window, true));
-            lease = new CallbackDisposable(() => LeaseDisposed = true);
+            lease = new CallbackLease(
+                () => { Minimized.Add(window); LeaseDisposalOrder.Add("Minimized"); },
+                () => { LeaseDisposed = true; LeaseDisposalOrder.Add("Disposed"); });
             return true;
         }
     }
 
-    private sealed class CallbackDisposable(Action callback) : IDisposable
+    private sealed class CallbackLease(Action onMinimize, Action onDispose) : IAlgoTradingLease
     {
-        public void Dispose() => callback();
+        public bool TryMinimize()
+        {
+            onMinimize();
+            return true;
+        }
+
+        public void Dispose() => onDispose();
     }
 
     private sealed class FakeProcess(TerminalRuntimeState state) : ITerminalProcessController

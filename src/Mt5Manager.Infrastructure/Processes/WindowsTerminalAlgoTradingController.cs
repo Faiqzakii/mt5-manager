@@ -5,15 +5,21 @@ using Mt5Manager.Domain.Models;
 
 namespace Mt5Manager.Infrastructure.Processes;
 
+public interface IAlgoTradingLease : IDisposable
+{
+    bool TryMinimize();
+}
+
 public interface IAlgoTradingInput
 {
-    bool TryAcquire(nint window, out IDisposable? lease);
+    bool TryAcquire(nint window, out IAlgoTradingLease? lease);
 }
 
 public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingController
 {
     private const int WmSyscommand = 0x0112;
     private const nint ScRestore = 0xF120;
+    private const nint ScMinimize = 0xF020;
     private const uint KeyEvent = 0x0001;
     private const uint KeyEventUp = 0x0002;
     private const ushort VkControl = 0x11;
@@ -74,7 +80,11 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
                 while (true)
                 {
                     var observed = await inspector.ReadAsync(terminal, cancellationToken);
-                    if (observed?.GlobalAlgoTrading == desired) return new(true, enable ? "Algo Trading was enabled." : "Algo Trading was disabled.", observed);
+                    if (observed?.GlobalAlgoTrading == desired)
+                    {
+                        lease.TryMinimize();
+                        return new(true, enable ? "Algo Trading was enabled." : "Algo Trading was disabled.", observed);
+                    }
                     if (clock() >= deadline) return new(false, enable ? "Algo Trading did not become enabled." : "Algo Trading did not become disabled.", observed ?? current);
                     await Task.Delay(pollInterval, cancellationToken);
                 }
@@ -99,7 +109,7 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
 
     private sealed class Win32AlgoTradingInput : IAlgoTradingInput
     {
-        public bool TryAcquire(nint window, out IDisposable? lease)
+        public bool TryAcquire(nint window, out IAlgoTradingLease? lease)
         {
             lease = null;
             var foreground = GetForegroundWindow();
@@ -126,7 +136,7 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
                 return false;
             }
 
-            lease = new ForegroundLease(foreground, currentThread, previousThread, attached);
+            lease = new ForegroundLease(window, foreground, currentThread, previousThread, attached);
             return true;
         }
 
@@ -135,9 +145,11 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
             if (foreground != nint.Zero) SetForegroundWindow(foreground);
         }
 
-        private sealed class ForegroundLease(nint foreground, uint currentThread, uint previousThread, bool attached) : IDisposable
+        private sealed class ForegroundLease(nint window, nint foreground, uint currentThread, uint previousThread, bool attached) : IAlgoTradingLease
         {
             private bool disposed;
+
+            public bool TryMinimize() => !disposed && PostMessage(window, WmSyscommand, ScMinimize, 0);
 
             public void Dispose()
             {
