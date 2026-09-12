@@ -284,6 +284,37 @@ public sealed class TerminalOperationCoordinatorTests
     }
 
     [Fact]
+    public async Task Completed_operation_releases_its_gate_state()
+    {
+        var terminalId = Guid.NewGuid();
+        var coordinator = Coordinator(new FakeRegistry(Registration(terminalId)), new FakeProcessController(),
+            new FakeCleanupService(), new RecordingAuditLogger());
+
+        var preparation = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs));
+        await coordinator.ContinueCleanupAsync(preparation, forceApproved: false);
+
+        coordinator.GateCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Stateless_rejection_releases_its_gate_and_can_still_be_continued()
+    {
+        var terminalId = Guid.NewGuid();
+        var audit = new RecordingAuditLogger();
+        var coordinator = Coordinator(new FakeRegistry(Registration(terminalId, verified: false)),
+            new FakeProcessController(), new FakeCleanupService(), audit);
+
+        var preparation = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs));
+
+        coordinator.GateCount.Should().Be(0);
+        preparation.ReservationToken.Should().NotBeEmpty("the signature authenticates stateless rejection data");
+        (await coordinator.ContinueCleanupAsync(preparation, forceApproved: true)).Status
+            .Should().Be(CleanupOutcomeStatus.Rejected);
+        audit.Records.Should().ContainSingle().Which.Message.Should().Be(preparation.Message);
+        coordinator.GateCount.Should().Be(0);
+    }
+
+    [Fact]
     public async Task Unknown_terminal_rejection_preserves_reason_in_audit()
     {
         var controller = new FakeProcessController();
@@ -521,6 +552,26 @@ public sealed class TerminalOperationCoordinatorTests
     }
 
     [Fact]
+    public async Task Concurrent_same_terminal_operations_release_their_gate_state()
+    {
+        var terminalId = Guid.NewGuid();
+        var controller = new BlockingProcessController();
+        var coordinator = Coordinator(new FakeRegistry(Registration(terminalId)), controller,
+            new FakeCleanupService(), new RecordingAuditLogger());
+
+        var first = coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs));
+        await controller.WaitForEntriesAsync(1);
+        var second = coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Ticks));
+
+        controller.ReleaseAll();
+        var preparations = await Task.WhenAll(first, second);
+        await coordinator.CancelPreparationAsync(preparations[0]);
+
+        coordinator.GateCount.Should().Be(0);
+        controller.MaxConcurrent.Should().Be(1);
+    }
+
+    [Fact]
     public async Task Operations_on_different_terminals_do_not_share_a_lock()
     {
         var firstId = Guid.NewGuid();
@@ -600,19 +651,21 @@ public sealed class TerminalOperationCoordinatorTests
     }
 
     [Fact]
-    public async Task Cancel_releases_the_reservation_held_for_a_rejected_preparation()
+    public async Task Cancelling_rejected_interleaved_preparation_does_not_release_active_reservation()
     {
         var terminalId = Guid.NewGuid();
+        var cleanup = new FakeCleanupService();
         var coordinator = Coordinator(new FakeRegistry(Registration(terminalId)), new FakeProcessController(),
-            new FakeCleanupService(), new RecordingAuditLogger());
-        await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs));
+            cleanup, new RecordingAuditLogger());
+        var active = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs));
         var rejected = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Ticks));
         rejected.Status.Should().Be(CleanupPreparationStatus.Rejected);
 
         await coordinator.CancelPreparationAsync(rejected);
 
-        (await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.History))).Status
-            .Should().Be(CleanupPreparationStatus.Ready);
+        (await coordinator.ContinueCleanupAsync(active, forceApproved: false)).Status
+            .Should().Be(CleanupOutcomeStatus.Completed);
+        cleanup.Requests.Should().ContainSingle().Which.Should().Equal(CleanupCategory.Logs);
     }
 
     [Fact]
@@ -704,6 +757,26 @@ public sealed class TerminalOperationCoordinatorTests
 
         (await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Ticks)))
             .Status.Should().Be(CleanupPreparationStatus.Ready);
+    }
+
+    [Fact]
+    public async Task Pre_canceled_continue_for_rejected_interleaved_preparation_does_not_release_active_reservation()
+    {
+        var terminalId = Guid.NewGuid();
+        var cleanup = new FakeCleanupService();
+        var coordinator = Coordinator(new FakeRegistry(Registration(terminalId)), new FakeProcessController(),
+            cleanup, new RecordingAuditLogger());
+        var active = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs));
+        var rejected = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Ticks));
+        using var cancellation = new CancellationTokenSource();
+        await cancellation.CancelAsync();
+
+        var abandon = () => coordinator.ContinueCleanupAsync(rejected, forceApproved: false, cancellation.Token);
+        await abandon.Should().ThrowAsync<OperationCanceledException>();
+
+        (await coordinator.ContinueCleanupAsync(active, forceApproved: false)).Status
+            .Should().Be(CleanupOutcomeStatus.Completed);
+        cleanup.Requests.Should().ContainSingle().Which.Should().Equal(CleanupCategory.Logs);
     }
 
     private static TerminalOperationCoordinator Coordinator(

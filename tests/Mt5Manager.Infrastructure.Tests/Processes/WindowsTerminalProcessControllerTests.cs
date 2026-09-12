@@ -86,6 +86,20 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Natural_exit_during_active_stop_does_not_deadlock()
+    {
+        var terminal = Registration(_root, Path.Combine(_root, "natural-stop.json"), "self-exit");
+        Track(await _controller.StartAsync(terminal, CancellationToken.None));
+
+        var stop = _controller.StopAsync(terminal, TimeSpan.FromSeconds(10), false, CancellationToken.None);
+        var finished = await Task.WhenAny(stop, Task.Delay(TimeSpan.FromSeconds(15)));
+
+        finished.Should().BeSameAs(stop, "the exit handler must not deadlock an active stop");
+        (await stop).Outcome.Should().BeOneOf(StopOutcome.ExitedGracefully, StopOutcome.AlreadyStopped);
+        TrackedProcessCount().Should().Be(0);
+    }
+
+    [Fact]
     public async Task Stop_times_out_without_force_and_leaves_process_running()
     {
         var terminal = Registration(_root, Path.Combine(_root, "timeout.json"), "ignore");
@@ -221,7 +235,7 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
         var data = DataDirectory("duplicate-exit");
         var terminal = RegistrationWithData(data, _root, Path.Combine(_root, "duplicate-exit.json"), "exit", $"/datadir:{data}");
         var first = StartExternally(terminal);
-        var second = StartExternally(terminal);
+        var second = StartExternally(WithLaunchRecord(terminal, "duplicate-exit-second.json"));
 
         var result = await _controller.StopAsync(terminal, TimeSpan.FromSeconds(5), false, CancellationToken.None);
 
@@ -236,7 +250,7 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
         var data = DataDirectory("duplicate-ignore");
         var terminal = RegistrationWithData(data, _root, Path.Combine(_root, "duplicate-ignore.json"), "ignore", $"/datadir:{data}");
         var first = StartExternally(terminal);
-        var second = StartExternally(terminal);
+        var second = StartExternally(WithLaunchRecord(terminal, "duplicate-ignore-second.json"));
 
         var timedOut = await _controller.StopAsync(terminal, TimeSpan.FromMilliseconds(300), false, CancellationToken.None);
 
@@ -268,6 +282,70 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
         stop.Outcome.Should().Be(StopOutcome.Failed);
         stop.Error.Should().NotBeNullOrWhiteSpace();
         external.HasExited.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Dispose_releases_tracking_without_terminating_process_and_is_idempotent()
+    {
+        var terminal = Registration(_root, Path.Combine(_root, "dispose.json"), "ignore");
+        var pid = Track(await _controller.StartAsync(terminal, CancellationToken.None));
+
+        _controller.Dispose();
+        _controller.Dispose();
+
+        TrackedProcessCount().Should().Be(0);
+        using var process = Process.GetProcessById(pid);
+        process.HasExited.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Operations_after_dispose_throw_ObjectDisposedException()
+    {
+        var terminal = Registration(_root, Path.Combine(_root, "disposed.json"), "ignore");
+        _controller.Dispose();
+
+        var getState = () => _controller.GetStateAsync(terminal, CancellationToken.None);
+        var start = () => _controller.StartAsync(terminal, CancellationToken.None);
+        var stop = () => _controller.StopAsync(terminal, TimeSpan.Zero, false, CancellationToken.None);
+
+        await getState.Should().ThrowAsync<ObjectDisposedException>();
+        await start.Should().ThrowAsync<ObjectDisposedException>();
+        await stop.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task Dispose_on_blocked_synchronization_context_completes_while_stop_is_inflight()
+    {
+        var terminal = Registration(_root, Path.Combine(_root, "blocked-dispatcher.json"), "ignore");
+        var pid = Track(await _controller.StartAsync(terminal, CancellationToken.None));
+        await WaitForMainWindowAsync(pid);
+
+        // Simulates WPF shutdown: an operation started on the dispatcher thread is still in flight when
+        // Dispose blocks that thread. If continuations post back to the blocked context instead of the
+        // thread pool, the active operation count never reaches zero and Dispose deadlocks.
+        Exception? failure = null;
+        Task<StopResult>? stopTask = null;
+        using var finished = new ManualResetEventSlim(false);
+        var dispatcher = new Thread(() =>
+        {
+            SynchronizationContext.SetSynchronizationContext(new UndrainedSynchronizationContext());
+            try
+            {
+                stopTask = _controller.StopAsync(terminal, TimeSpan.FromSeconds(1), false, CancellationToken.None);
+                _controller.Dispose();
+            }
+            catch (Exception exception) { failure = exception; }
+            finally { finished.Set(); }
+        }) { IsBackground = true };
+        dispatcher.Start();
+
+        finished.Wait(TimeSpan.FromSeconds(15)).Should().BeTrue("Dispose must not wait on continuations posted to the blocked context");
+        failure.Should().BeNull();
+        dispatcher.Join(TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+        stopTask.Should().NotBeNull();
+        (await Task.WhenAny(stopTask!, Task.Delay(TimeSpan.FromSeconds(5)))).Should().BeSameAs(stopTask);
+        (await stopTask!).Outcome.Should().Be(StopOutcome.TimedOut);
     }
 
     public Task InitializeAsync()
@@ -318,6 +396,15 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
         new(Guid.NewGuid(), "Fixture", FixturePath, dataDirectory, workingDirectory, arguments, DiscoverySource.Manual, true);
 
     private string DataDirectory(string name) => Directory.CreateDirectory(Path.Combine(_root, name)).FullName;
+
+    // Both instances of one record must share the data directory to count as duplicates, but they
+    // cannot write the same launch record concurrently.
+    private TerminalRegistration WithLaunchRecord(TerminalRegistration terminal, string fileName)
+    {
+        var arguments = terminal.Arguments.ToArray();
+        arguments[0] = Path.Combine(_root, fileName);
+        return terminal with { Arguments = arguments };
+    }
 
     private int TrackedProcessCount() =>
         ((System.Collections.IDictionary)typeof(WindowsTerminalProcessController)
@@ -402,5 +489,20 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
         public nint Open(int processId) => processId == opaqueProcessId ? nint.Zero : _inner.Open(processId);
 
         public void Close(nint handle) => _inner.Close(handle);
+    }
+
+    // Mimics a blocked WPF dispatcher: continuations queue for the owning thread, which never drains them.
+    private sealed class UndrainedSynchronizationContext : SynchronizationContext
+    {
+        private readonly Queue<(SendOrPostCallback Callback, object? State)> _posted = new();
+
+        public override void Post(SendOrPostCallback callback, object? state)
+        {
+            lock (_posted) _posted.Enqueue((callback, state));
+        }
+
+        public override void Send(SendOrPostCallback callback, object? state) => callback(state);
+
+        public override SynchronizationContext CreateCopy() => this;
     }
 }

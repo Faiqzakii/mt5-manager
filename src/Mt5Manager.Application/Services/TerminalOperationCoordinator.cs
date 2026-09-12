@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text.Json;
 using System.Collections.Frozen;
 using System.Collections.Immutable;
 using System.Collections.Concurrent;
@@ -28,10 +30,12 @@ public sealed class TerminalOperationCoordinator
     private readonly ITerminalCleanupService _cleanupService;
     private readonly IAuditLogger _auditLogger;
     private readonly TimeSpan _stopTimeout;
-    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _gates = new();
-    private readonly ConcurrentDictionary<Guid, CleanupPreparation> _issuedRejections = new();
+    private readonly ConcurrentDictionary<Guid, GateState> _gates = new();
     private readonly ConcurrentDictionary<Guid, CleanupPreparation> _issuedActive = new();
     private readonly ConcurrentDictionary<Guid, Guid> _reservations = new();
+    private readonly byte[] _rejectionKey = RandomNumberGenerator.GetBytes(32);
+
+    internal int GateCount => _gates.Count;
 
     public TerminalOperationCoordinator(ITerminalRegistry registry, ITerminalProcessController processController,
         ITerminalCleanupService cleanupService, IAuditLogger auditLogger, TimeSpan? stopTimeout = null)
@@ -52,10 +56,8 @@ public sealed class TerminalOperationCoordinator
         var ownedRequest = new CleanupRequest(request.TerminalId, request.Categories.ToFrozenSet());
         var found = await FindTerminalAsync(ownedRequest.TerminalId, cancellationToken);
         var snapshot = Snapshot(found ?? UnknownTerminal(ownedRequest.TerminalId));
-        var gate = GateFor(ownedRequest.TerminalId);
-        await gate.WaitAsync(cancellationToken);
-        try
-        {
+        await using var gate = await AcquireGateAsync(ownedRequest.TerminalId, cancellationToken);
+
             if (_reservations.ContainsKey(ownedRequest.TerminalId))
                 return IssueRejected(ownedRequest, snapshot, "Another operation is already prepared for this terminal.");
             if (found is null) return IssueRejected(ownedRequest, snapshot, "The terminal is no longer registered.");
@@ -91,27 +93,25 @@ public sealed class TerminalOperationCoordinator
                 _reservations.TryRemove(new KeyValuePair<Guid, Guid>(ownedRequest.TerminalId, token));
                 throw;
             }
-        }
-        finally { gate.Release(); }
+
     }
 
     public async Task<CleanupOutcome> ContinueCleanupAsync(CleanupPreparation preparation, bool forceApproved,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(preparation);
-        var gate = GateFor(preparation.Request.TerminalId);
-        try { await gate.WaitAsync(cancellationToken); }
+        GateLease gate;
+        try { gate = await AcquireGateAsync(preparation.Request.TerminalId, cancellationToken); }
         catch (OperationCanceledException)
         {
-            // The dialog was abandoned before this operation started: hand the reservation back, or the
-            // terminal stays blocked for every later cleanup until the application restarts.
-            Discard(preparation.ReservationToken);
-            Release(preparation);
+            // Only the exact issued preparation may surrender its reservation. Rejected, stale, or
+            // tampered preparations must not unblock a different operation on the same terminal.
+            Consume(preparation);
             throw;
         }
-        try
-        {
-            if (TryConsumeIssuedRejection(preparation))
+        await using var gateLease = gate;
+
+            if (IsIssuedRejection(preparation))
                 return await RejectAndAuditAsync(preparation,
                     preparation.Message ?? "The cleanup was rejected.");
             if (!Consume(preparation))
@@ -136,8 +136,7 @@ public sealed class TerminalOperationCoordinator
             {
                 Release(preparation);
             }
-        }
-        finally { gate.Release(); }
+
     }
 
     public async Task CancelPreparationAsync(CleanupPreparation preparation,
@@ -145,25 +144,12 @@ public sealed class TerminalOperationCoordinator
     {
         ArgumentNullException.ThrowIfNull(preparation);
         var terminalId = preparation.Request.TerminalId;
-        var gate = GateFor(terminalId);
-        await gate.WaitAsync(cancellationToken);
-        try
-        {
-            // The dialog is abandoning this terminal: drop the preparation it handed over and any
-            // preparation this coordinator still holds for the same terminal, so a cancelled
-            // preparation can never leak the per-terminal reservation.
-            Discard(preparation.ReservationToken);
-            if (_reservations.TryGetValue(terminalId, out var reservedToken))
-            {
-                if (_issuedActive.TryGetValue(reservedToken, out var reserved)) Consume(reserved);
-                else
-                {
-                    Discard(reservedToken);
-                    _reservations.TryRemove(new KeyValuePair<Guid, Guid>(terminalId, reservedToken));
-                }
-            }
-        }
-        finally { gate.Release(); }
+        await using var gate = await AcquireGateAsync(terminalId, cancellationToken);
+
+            // Only the exact issued preparation may surrender its reservation. Rejected, stale, or
+            // tampered preparations must not unblock a different operation on the same terminal.
+            Consume(preparation);
+
     }
 
     private async Task<CleanupOutcome> CompleteAsync(TerminalRegistration terminal, CleanupPreparation preparation,
@@ -299,8 +285,6 @@ public sealed class TerminalOperationCoordinator
     {
         if (_issuedActive.TryGetValue(reservationToken, out var active))
             _issuedActive.TryRemove(new KeyValuePair<Guid, CleanupPreparation>(reservationToken, active));
-        if (_issuedRejections.TryGetValue(reservationToken, out var rejected))
-            _issuedRejections.TryRemove(new KeyValuePair<Guid, CleanupPreparation>(reservationToken, rejected));
     }
 
     private bool Consume(CleanupPreparation preparation)
@@ -322,21 +306,88 @@ public sealed class TerminalOperationCoordinator
     }
     private CleanupPreparation IssueRejected(CleanupRequest request, TerminalRegistration terminal, string message)
     {
-        var preparation = Prepared(CleanupPreparationStatus.Rejected, request, false, message, terminal, Guid.NewGuid());
-        _issuedRejections.TryAdd(preparation.ReservationToken, preparation);
-        return preparation;
+        var unsigned = Prepared(CleanupPreparationStatus.Rejected, request, false, message, terminal, Guid.Empty);
+        return unsigned with { ReservationToken = SignRejection(unsigned) };
     }
-    private bool TryConsumeIssuedRejection(CleanupPreparation preparation) =>
-        _issuedRejections.TryGetValue(preparation.ReservationToken, out var issued) &&
-        issued == preparation &&
-        _issuedRejections.TryRemove(new KeyValuePair<Guid, CleanupPreparation>(preparation.ReservationToken, issued));
+    private bool IsIssuedRejection(CleanupPreparation preparation) =>
+        preparation.Status == CleanupPreparationStatus.Rejected &&
+        preparation.ReservationToken != Guid.Empty &&
+        CryptographicOperations.FixedTimeEquals(
+            preparation.ReservationToken.ToByteArray(), SignRejection(preparation with { ReservationToken = Guid.Empty }).ToByteArray());
     private static CleanupPreparation Prepared(CleanupPreparationStatus status, CleanupRequest request, bool wasRunning,
         string? message, TerminalRegistration terminal, Guid token) =>
         new(status, request, wasRunning, message, terminal, token);
     private static CleanupResult EmptyResult(bool wasRunning) => new(wasRunning, false, [], null);
     private async Task<TerminalRegistration?> FindTerminalAsync(Guid id, CancellationToken token) =>
         (await _registry.LoadAsync(token)).FirstOrDefault(terminal => terminal.Id == id);
-    private SemaphoreSlim GateFor(Guid id) => _gates.GetOrAdd(id, static _ => new SemaphoreSlim(1, 1));
+    private async ValueTask<GateLease> AcquireGateAsync(Guid id, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var state = _gates.GetOrAdd(id, static _ => new GateState());
+            lock (state)
+            {
+                if (state.Retired) continue;
+                state.ReferenceCount++;
+            }
+
+            try
+            {
+                await state.Semaphore.WaitAsync(cancellationToken);
+                return new GateLease(this, id, state);
+            }
+            catch
+            {
+                ReleaseGate(id, state, acquired: false);
+                throw;
+            }
+        }
+    }
+
+    private void ReleaseGate(Guid id, GateState state, bool acquired)
+    {
+        if (acquired) state.Semaphore.Release();
+        lock (state)
+        {
+            state.ReferenceCount--;
+            if (state.ReferenceCount != 0) return;
+            state.Retired = true;
+            _gates.TryRemove(new KeyValuePair<Guid, GateState>(id, state));
+        }
+        state.Semaphore.Dispose();
+    }
+
+    private Guid SignRejection(CleanupPreparation preparation)
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            preparation.Status,
+            preparation.Request.TerminalId,
+            Categories = preparation.Request.Categories.OrderBy(static category => category),
+            preparation.WasRunning,
+            preparation.Message,
+            Terminal = preparation.TerminalSnapshot
+        });
+        using var hmac = new HMACSHA256(_rejectionKey);
+        return new Guid(hmac.ComputeHash(payload).AsSpan(0, 16));
+    }
+    private sealed class GateState
+    {
+        public SemaphoreSlim Semaphore { get; } = new(1, 1);
+        public int ReferenceCount { get; set; }
+        public bool Retired { get; set; }
+    }
+
+    private sealed class GateLease(TerminalOperationCoordinator owner, Guid id, GateState state) : IAsyncDisposable
+    {
+        private int _released;
+
+        public ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0) owner.ReleaseGate(id, state, acquired: true);
+            return ValueTask.CompletedTask;
+        }
+    }
     private static TerminalRegistration Snapshot(TerminalRegistration terminal) =>
         terminal with { Arguments = terminal.Arguments.ToImmutableArray() };
     private static TerminalRegistration UnknownTerminal(Guid id) =>

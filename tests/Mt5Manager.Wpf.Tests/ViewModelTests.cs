@@ -18,6 +18,39 @@ public sealed class ViewModelTests
         vm.Terminals.Should().ContainSingle(); vm.Terminals[0].State.Should().Be(TerminalState.Running); vm.Terminals[0].ProcessId.Should().Be(77);
     }
 
+    [Fact] public async Task State_refresh_leaves_storage_uninspected()
+    {
+        var row=new TerminalRowViewModel(T(),new Process());
+        await row.RefreshStateAsync();
+        row.StorageSummary.Should().Be("Storage not inspected");
+    }
+
+    [Fact] public async Task Overlapping_state_refresh_is_skipped()
+    {
+        var process=new BlockingProcess(); var vm=new MainViewModel(new Discovery([T("Alpha"),T("Beta")]),new Registry(),process);
+        var discoveryRefresh=vm.RefreshAsync(); await process.Started.Task; process.Release.SetResult(); await discoveryRefresh;
+        process.Reset(); var first=vm.RefreshStatesAsync(); await process.Started.Task;
+        await vm.RefreshStatesAsync();
+        process.Calls.Should().Be(1,"the overlapping cycle must not advance to the second row");
+        process.Release.SetResult(); await first;
+    }
+
+    [Fact] public async Task Discovery_refresh_retains_row_for_unchanged_registration()
+    {
+        var terminal=T() with { Arguments=["/portable"] }; var discovery=new Discovery([terminal]); var vm=new MainViewModel(discovery,new Registry(),new Process());
+        await vm.RefreshAsync(); var original=vm.Terminals.Single();
+        discovery.Items=[terminal with { Arguments=new[]{"/portable"} }]; await vm.RefreshAsync();
+        vm.Terminals.Single().Should().BeSameAs(original);
+    }
+
+    [Fact] public async Task Discovery_refresh_replaces_row_for_changed_registration()
+    {
+        var terminal=T() with { Arguments=["/portable"] }; var discovery=new Discovery([terminal]); var vm=new MainViewModel(discovery,new Registry(),new Process());
+        await vm.RefreshAsync(); var original=vm.Terminals.Single();
+        discovery.Items=[terminal with { Arguments=["/portable","/skipupdate"] }]; await vm.RefreshAsync();
+        vm.Terminals.Single().Should().NotBeSameAs(original); vm.Terminals.Single().Terminal.Arguments.Should().Equal("/portable","/skipupdate");
+    }
+
     static TerminalRegistration T(string name="Alpha", bool verified=true) => new(Guid.NewGuid(),name,@"C:\terminal64.exe",@"C:\Data",@"C:\",[],DiscoverySource.Manual,verified);
 
     [Fact] public async Task Main_filters_and_scan_replaces_results()
@@ -54,18 +87,18 @@ public sealed class ViewModelTests
         process.ThrowStart=false; await row.StartAsync(); row.State.Should().Be(TerminalState.Running); row.StopCommand.CanExecute(null).Should().BeTrue();
     }
 
-    [Fact] public async Task Row_exposes_pid_sizes_restart_and_independent_cleanup_busy_state()
+    [Fact] public async Task Row_exposes_pid_restart_and_independent_cleanup_busy_state()
     {
-        var process=new Process { State=new(TerminalState.Running,42,null) }; var row=new TerminalRowViewModel(T(),process,new Inspector());
+        var process=new Process { State=new(TerminalState.Running,42,null) }; var row=new TerminalRowViewModel(T(),process);
         await row.RefreshStateAsync();
-        row.ProcessId.Should().Be(42); row.StorageSummary.Should().Contain("Logs"); row.RestartCommand.CanExecute(null).Should().BeTrue(); row.CanCleanup.Should().BeTrue();
+        row.ProcessId.Should().Be(42); row.StorageSummary.Should().Be("Storage not inspected"); row.RestartCommand.CanExecute(null).Should().BeTrue(); row.CanCleanup.Should().BeTrue();
         await row.RestartAsync(); row.LastResult.Should().Contain("restarted");
     }
 
     [Fact] public async Task Row_projects_bridge_account_and_algo_permissions()
     {
         var process=new Process { State=new(TerminalState.Running,42,null) }; var runtime=new Runtime{Snapshot=NewSnapshot(AlgoTradingState.Enabled)};
-        var row=new TerminalRowViewModel(T(),process,new Inspector(),runtime,new Algo());
+        var row=new TerminalRowViewModel(T(),process,runtime,new Algo());
         await row.RefreshStateAsync();
         row.AccountSummary.Should().Be("12345 · Trader · Broker-Live · Real");
         row.AlgoSummary.Should().Be("Global Enabled · EA allowed · Account allowed · Expert allowed · connected");
@@ -75,7 +108,7 @@ public sealed class ViewModelTests
 
     [Fact] public async Task Row_hides_bridge_state_and_refuses_algo_command_without_snapshot()
     {
-        var process=new Process { State=new(TerminalState.Running,42,null) }; var row=new TerminalRowViewModel(T(),process,new Inspector());
+        var process=new Process { State=new(TerminalState.Running,42,null) }; var row=new TerminalRowViewModel(T(),process);
         await row.RefreshStateAsync();
         row.AccountSummary.Should().Be("Bridge unavailable"); row.AlgoSummary.Should().Be("Algo Trading unknown");
         row.EnableAlgoCommand.CanExecute(null).Should().BeFalse(); row.DisableAlgoCommand.CanExecute(null).Should().BeFalse();
@@ -85,7 +118,7 @@ public sealed class ViewModelTests
     {
         var process=new Process { State=new(TerminalState.Running,42,null) }; var runtime=new Runtime{Snapshot=NewSnapshot(AlgoTradingState.Disabled)};
         var algo=new Algo{Result=new(true,"Algo Trading was enabled.",NewSnapshot(AlgoTradingState.Enabled))};
-        var row=new TerminalRowViewModel(T(),process,new Inspector(),runtime,algo);
+        var row=new TerminalRowViewModel(T(),process,runtime,algo);
         await row.RefreshStateAsync(); row.EnableAlgoCommand.CanExecute(null).Should().BeTrue();
         await row.EnableAlgoAsync();
         algo.Calls.Should().Be(1); algo.LastEnable.Should().BeTrue(); row.LastResult.Should().Be("Algo Trading was enabled."); row.AlgoSummary.Should().Contain("Global Enabled");
@@ -95,7 +128,7 @@ public sealed class ViewModelTests
     {
         var process=new Process { State=new(TerminalState.Running,42,null) }; var runtime=new Runtime{Snapshot=NewSnapshot(AlgoTradingState.Disabled)};
         var algo=new Algo{Result=new(false,"Several matching MetaTrader 5 windows were found.",null)};
-        var row=new TerminalRowViewModel(T(),process,new Inspector(),runtime,algo);
+        var row=new TerminalRowViewModel(T(),process,runtime,algo);
         await row.RefreshStateAsync(); await row.EnableAlgoAsync();
         row.Error.Should().Be("Several matching MetaTrader 5 windows were found."); row.LastResult.Should().Contain("Failed");
     }
@@ -209,7 +242,8 @@ public sealed class ViewModelTests
     sealed class Discovery(IReadOnlyList<TerminalRegistration> items):ITerminalDiscovery { public IReadOnlyList<TerminalRegistration> Items=items; public Task<IReadOnlyList<TerminalRegistration>> DiscoverAsync(CancellationToken c=default)=>Task.FromResult(Items); }
     sealed class Registry:ITerminalRegistry { public IReadOnlyList<TerminalRegistration> Items=[]; public bool ThrowOnSave; public Task<IReadOnlyList<TerminalRegistration>> LoadAsync(CancellationToken c=default)=>Task.FromResult(Items); public Task SaveAsync(IReadOnlyList<TerminalRegistration> t,CancellationToken c=default){if(ThrowOnSave)throw new IOException("The registry is locked.");Items=t;return Task.CompletedTask;} }
     sealed class Process:ITerminalProcessController { public TerminalRuntimeState State=new(TerminalState.Running,1,null); public bool ThrowStart; public bool Timeout; public StopOutcome? StopOutcome; public int StartCalls; public Task<TerminalRuntimeState> GetStateAsync(TerminalRegistration t,CancellationToken c)=>Task.FromResult(State); public Task<int> StartAsync(TerminalRegistration t,CancellationToken c){StartCalls++;if(ThrowStart)throw new InvalidOperationException("boom");State=new(TerminalState.Running,1,null);return Task.FromResult(1);} public Task<StopResult> StopAsync(TerminalRegistration t,TimeSpan x,bool force,CancellationToken c){var outcome=force?Mt5Manager.Application.Abstractions.StopOutcome.ForceTerminated:StopOutcome??(Timeout?Mt5Manager.Application.Abstractions.StopOutcome.TimedOut:Mt5Manager.Application.Abstractions.StopOutcome.ExitedGracefully);if(outcome is Mt5Manager.Application.Abstractions.StopOutcome.ExitedGracefully or Mt5Manager.Application.Abstractions.StopOutcome.AlreadyStopped or Mt5Manager.Application.Abstractions.StopOutcome.ForceTerminated)State=new(TerminalState.Stopped,null,null);return Task.FromResult(new StopResult(outcome,outcome==Mt5Manager.Application.Abstractions.StopOutcome.Failed?"stop failed":null));} }
-    sealed class Inspector:ITerminalStorageInspector { public Task<IReadOnlyList<CategoryUsage>> InspectAsync(TerminalRegistration t,CancellationToken c)=>Task.FromResult<IReadOnlyList<CategoryUsage>>([new(CleanupCategory.Logs,12,1200)]); }
+    sealed class Inspector:ITerminalStorageInspector { public int Calls; public Task<IReadOnlyList<CategoryUsage>> InspectAsync(TerminalRegistration t,CancellationToken c){Calls++;return Task.FromResult<IReadOnlyList<CategoryUsage>>([new(CleanupCategory.Logs,12,1200)]);} }
+    sealed class BlockingProcess:ITerminalProcessController { public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously); public int Calls; public void Reset(){Started=new(TaskCreationOptions.RunContinuationsAsynchronously);Release=new(TaskCreationOptions.RunContinuationsAsynchronously);Calls=0;} public async Task<TerminalRuntimeState> GetStateAsync(TerminalRegistration t,CancellationToken c){Calls++;Started.TrySetResult();await Release.Task;return new(TerminalState.Running,1,null);} public Task<int> StartAsync(TerminalRegistration t,CancellationToken c)=>Task.FromResult(1); public Task<StopResult> StopAsync(TerminalRegistration t,TimeSpan timeout,bool force,CancellationToken c)=>Task.FromResult(new StopResult(StopOutcome.AlreadyStopped,null)); }
     sealed class Cleaner:ITerminalCleanupService { public Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(TerminalRegistration t,IReadOnlySet<CleanupCategory> c,CancellationToken x)=>Task.FromResult<IReadOnlyList<CleanupCategoryResult>>([new(CleanupCategory.Logs,11,1100,[new("locked","denied")])]); }
     sealed class BlockingCleaner:ITerminalCleanupService { public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously); public int Calls; public async Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(TerminalRegistration t,IReadOnlySet<CleanupCategory> c,CancellationToken x){Calls++;Started.SetResult();await Release.Task;return [];} }
     sealed class Audit:IAuditLogger { public Task AppendAsync(AuditRecord r,CancellationToken c=default)=>Task.CompletedTask; }

@@ -7,7 +7,7 @@ using Mt5Manager.Infrastructure.Discovery;
 
 namespace Mt5Manager.Infrastructure.Processes;
 
-public sealed class WindowsTerminalProcessController : ITerminalProcessController
+public sealed class WindowsTerminalProcessController : ITerminalProcessController, IDisposable
 {
     private static readonly TimeSpan MainWindowGrace = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan KillWait = TimeSpan.FromSeconds(5);
@@ -16,100 +16,119 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
     private readonly ConcurrentDictionary<Guid, TrackedProcess> _processes = new();
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly IProcessHandleSource _handles;
+    private readonly object _lifetimeLock = new();
+    private bool _disposed;
+    private int _activeOperations;
 
     public WindowsTerminalProcessController(IProcessHandleSource? handles = null) =>
         _handles = handles ?? new LimitedRightsProcessHandleSource();
 
     public async Task<TerminalRuntimeState> GetStateAsync(TerminalRegistration terminal, CancellationToken cancellationToken)
     {
-        await _gate.WaitAsync(cancellationToken);
+        EnterOperation();
         try
         {
+            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                try
+                {
+                    var scan = Scan(terminal);
+                    try
+                    {
+                        if (scan.Error is not null) return new TerminalRuntimeState(TerminalState.Error, null, scan.Error);
+                        return scan.Matches.Count == 0
+                            ? new TerminalRuntimeState(TerminalState.Stopped, null, null)
+                            : new TerminalRuntimeState(TerminalState.Running, scan.Matches.Min(process => process.Id), null);
+                    }
+                    finally { scan.Dispose(); }
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    return new TerminalRuntimeState(TerminalState.Error, null, exception.Message);
+                }
+            }
+            finally { _gate.Release(); }
+        }
+        finally { ExitOperation(); }
+    }
+
+    public async Task<int> StartAsync(TerminalRegistration terminal, CancellationToken cancellationToken)
+    {
+        EnterOperation();
+        try
+        {
+            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 var scan = Scan(terminal);
                 try
                 {
-                    if (scan.Error is not null) return new TerminalRuntimeState(TerminalState.Error, null, scan.Error);
-                    return scan.Matches.Count == 0
-                        ? new TerminalRuntimeState(TerminalState.Stopped, null, null)
-                        : new TerminalRuntimeState(TerminalState.Running, scan.Matches.Min(process => process.Id), null);
+                    if (scan.Error is not null || scan.Matches.Count > 0)
+                        throw new InvalidOperationException(scan.Error ?? $"Terminal '{terminal.DisplayName}' is already running.");
+
+                    var startInfo = new ProcessStartInfo
+                    {
+                        FileName = WindowsProcessQuery.CanonicalPath(terminal.ExecutablePath),
+                        WorkingDirectory = terminal.WorkingDirectory,
+                        UseShellExecute = false
+                    };
+                    foreach (var argument in terminal.Arguments) startInfo.ArgumentList.Add(argument);
+
+                    var process = Process.Start(startInfo) ?? throw new InvalidOperationException("The terminal process could not be started.");
+                    var tracked = new TrackedProcess(process);
+                    tracked.ExitHandler = (_, _) => RemoveExited(terminal.Id, tracked);
+                    _processes[terminal.Id] = tracked;
+                    process.Exited += tracked.ExitHandler;
+                    process.EnableRaisingEvents = true;
+                    return process.Id;
                 }
                 finally { scan.Dispose(); }
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                return new TerminalRuntimeState(TerminalState.Error, null, exception.Message);
-            }
+            finally { _gate.Release(); }
         }
-        finally { _gate.Release(); }
-    }
-
-    public async Task<int> StartAsync(TerminalRegistration terminal, CancellationToken cancellationToken)
-    {
-        await _gate.WaitAsync(cancellationToken);
-        try
-        {
-            var scan = Scan(terminal);
-            try
-            {
-                if (scan.Error is not null || scan.Matches.Count > 0)
-                    throw new InvalidOperationException(scan.Error ?? $"Terminal '{terminal.DisplayName}' is already running.");
-
-                var startInfo = new ProcessStartInfo
-                {
-                    FileName = WindowsProcessQuery.CanonicalPath(terminal.ExecutablePath),
-                    WorkingDirectory = terminal.WorkingDirectory,
-                    UseShellExecute = false
-                };
-                foreach (var argument in terminal.Arguments) startInfo.ArgumentList.Add(argument);
-
-                var process = Process.Start(startInfo) ?? throw new InvalidOperationException("The terminal process could not be started.");
-                var tracked = new TrackedProcess(process);
-                _processes[terminal.Id] = tracked;
-                process.Exited += (_, _) => _ = RemoveExitedAsync(terminal.Id, tracked);
-                process.EnableRaisingEvents = true;
-                return process.Id;
-            }
-            finally { scan.Dispose(); }
-        }
-        finally { _gate.Release(); }
+        finally { ExitOperation(); }
     }
 
     public async Task<StopResult> StopAsync(TerminalRegistration terminal, TimeSpan timeout, bool force, CancellationToken cancellationToken)
     {
-        await _gate.WaitAsync(cancellationToken);
+        EnterOperation();
         try
         {
-            var scan = Scan(terminal);
+            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                if (scan.Error is not null) return new StopResult(StopOutcome.Failed, scan.Error);
-                var matches = scan.Matches;
-                if (matches.Count == 0) return new StopResult(StopOutcome.AlreadyStopped, null);
+                var scan = Scan(terminal);
+                try
+                {
+                    if (scan.Error is not null) return new StopResult(StopOutcome.Failed, scan.Error);
+                    var matches = scan.Matches;
+                    if (matches.Count == 0) return new StopResult(StopOutcome.AlreadyStopped, null);
 
-                var budget = Stopwatch.StartNew();
-                foreach (var process in matches) await CloseMainWindowAsync(process, WindowGrace(timeout), cancellationToken);
+                    var budget = Stopwatch.StartNew();
+                    foreach (var process in matches) await CloseMainWindowAsync(process, WindowGrace(timeout), cancellationToken).ConfigureAwait(false);
 
-                if (await WaitForAllExitAsync(matches, Remaining(timeout, budget), cancellationToken))
-                    return Release(terminal.Id, matches, StopOutcome.ExitedGracefully);
+                    if (await WaitForAllExitAsync(matches, Remaining(timeout, budget), cancellationToken).ConfigureAwait(false))
+                        return Release(terminal.Id, matches, StopOutcome.ExitedGracefully);
 
-                if (!force) return new StopResult(StopOutcome.TimedOut, null);
+                    if (!force) return new StopResult(StopOutcome.TimedOut, null);
 
-                foreach (var process in matches) Kill(process);
-                if (!await WaitForAllExitAsync(matches, KillWait, cancellationToken))
-                    return new StopResult(StopOutcome.Failed, $"Terminal '{terminal.DisplayName}' could not be terminated.");
+                    foreach (var process in matches) Kill(process);
+                    if (!await WaitForAllExitAsync(matches, KillWait, cancellationToken).ConfigureAwait(false))
+                        return new StopResult(StopOutcome.Failed, $"Terminal '{terminal.DisplayName}' could not be terminated.");
 
-                return Release(terminal.Id, matches, StopOutcome.ForceTerminated);
+                    return Release(terminal.Id, matches, StopOutcome.ForceTerminated);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception exception)
+                {
+                    return new StopResult(StopOutcome.Failed, exception.Message);
+                }
+                finally { scan.Dispose(); }
             }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception exception)
-            {
-                return new StopResult(StopOutcome.Failed, exception.Message);
-            }
-            finally { scan.Dispose(); }
+            finally { _gate.Release(); }
         }
-        finally { _gate.Release(); }
+        finally { ExitOperation(); }
     }
 
     // Every live process belonging to this terminal record: the one this controller started plus any duplicates
@@ -220,7 +239,7 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
         var budget = Stopwatch.StartNew();
         while (budget.Elapsed < grace)
         {
-            await Task.Delay(PollInterval, cancellationToken);
+            await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
             if (!IsRunning(process)) return;
             // A terminal that has only just been launched may not own its main window yet.
             if (CloseMainWindow(process)) return;
@@ -255,7 +274,7 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
         {
             if (processes.All(process => !IsRunning(process))) return true;
             if (budget.Elapsed >= wait) return false;
-            await Task.Delay(PollInterval, cancellationToken);
+            await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -281,15 +300,24 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
         return new StopResult(outcome, null);
     }
 
+    // The Exited callback runs either on a thread pool thread while holding the Process object's
+    // internal lock, or synchronously on whatever thread polls HasExited — which may be an operation
+    // that already owns the gate. Blocking on the gate here would therefore deadlock. Queue the
+    // removal behind the gate as a counted operation instead: Dispose waits for in-flight removals
+    // before it disposes the semaphore, so the queued continuation can never touch a disposed gate.
+    private void RemoveExited(Guid registrationId, TrackedProcess tracked) =>
+        _ = RemoveExitedAsync(registrationId, tracked);
+
     private async Task RemoveExitedAsync(Guid registrationId, TrackedProcess tracked)
     {
+        if (!TryEnterOperation()) return;
         try
         {
-            await _gate.WaitAsync();
+            await _gate.WaitAsync().ConfigureAwait(false);
             try { Remove(registrationId, tracked); }
             finally { _gate.Release(); }
         }
-        catch (ObjectDisposedException) { }
+        finally { ExitOperation(); }
     }
 
     private void RemoveTracked(Guid registrationId, Process process)
@@ -300,11 +328,53 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
 
     private void Remove(Guid registrationId, TrackedProcess tracked)
     {
-        if (_processes.TryRemove(new KeyValuePair<Guid, TrackedProcess>(registrationId, tracked)))
-            tracked.Process.Dispose();
+        if (!_processes.TryRemove(new KeyValuePair<Guid, TrackedProcess>(registrationId, tracked))) return;
+        tracked.Process.Exited -= tracked.ExitHandler;
+        tracked.Process.Dispose();
     }
 
-    private sealed record TrackedProcess(Process Process);
+    public void Dispose()
+    {
+        lock (_lifetimeLock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            while (_activeOperations != 0) Monitor.Wait(_lifetimeLock);
+        }
+
+        foreach (var entry in _processes.ToArray()) Remove(entry.Key, entry.Value);
+        _gate.Dispose();
+    }
+
+    private void EnterOperation()
+    {
+        if (!TryEnterOperation()) throw new ObjectDisposedException(nameof(WindowsTerminalProcessController));
+    }
+
+    private bool TryEnterOperation()
+    {
+        lock (_lifetimeLock)
+        {
+            if (_disposed) return false;
+            _activeOperations++;
+            return true;
+        }
+    }
+
+    private void ExitOperation()
+    {
+        lock (_lifetimeLock)
+        {
+            _activeOperations--;
+            if (_disposed && _activeOperations == 0) Monitor.PulseAll(_lifetimeLock);
+        }
+    }
+
+    private sealed class TrackedProcess(Process process)
+    {
+        public Process Process { get; } = process;
+        public EventHandler ExitHandler { get; set; } = null!;
+    }
 
     private sealed class ProcessScan(List<Process> matches, List<Process> owned, string? error) : IDisposable
     {
