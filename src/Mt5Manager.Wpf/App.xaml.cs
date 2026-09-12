@@ -146,7 +146,11 @@ public sealed class TelegramApplicationLifetime
     {
         CancelOperations();
         using var timeout = new CancellationTokenSource(shutdownTimeout);
-        await botService.StopAsync(timeout.Token).ConfigureAwait(false);
+        try
+        {
+            await botService.StopAsync(timeout.Token).WaitAsync(shutdownTimeout).ConfigureAwait(false);
+        }
+        catch (TimeoutException) { }
     }
 }
 

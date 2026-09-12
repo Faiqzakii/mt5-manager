@@ -279,7 +279,9 @@ public sealed class TelegramSettingsViewModelTests
     sealed class Bot(List<string> timeline) : ITelegramBotService
     {
         public TelegramBotState State => TelegramBotState.Stopped;
+#pragma warning disable CS0067 // Required interface member is intentionally unused by this test double.
         public event EventHandler? StateChanged;
+#pragma warning restore CS0067
         public List<string> Events { get; } = [];
         public Exception? ApplyException { get; set; }
         public int StartCalls { get; private set; }

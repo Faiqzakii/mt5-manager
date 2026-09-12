@@ -329,12 +329,36 @@ public sealed class ViewModelTests
         vm.Terminals.Should().BeEmpty();
     }
 
+    [Fact]
+    public async Task Outstanding_refresh_completes_after_window_lifetime_is_canceled_and_disposed()
+    {
+        var process = new BlockingProcess();
+        var vm = new MainViewModel(new Discovery([T("Alpha"), T("Beta")]), new Registry(), process);
+        var discoveryRefresh = vm.RefreshAsync();
+        await process.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        process.Release.SetResult();
+        await discoveryRefresh.WaitAsync(TimeSpan.FromSeconds(2));
+        process.Reset();
+        using var lifetime = new CancellationTokenSource();
+        var refresh = vm.RefreshStatesAsync(lifetime.Token);
+        await process.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        process.Release.SetResult();
+
+        lifetime.Cancel();
+        lifetime.Dispose();
+        await Task.Yield();
+
+        await refresh.WaitAsync(TimeSpan.FromSeconds(1));
+        process.Calls.Should().BeLessThanOrEqualTo(2);
+    }
+
     sealed class Discovery(IReadOnlyList<TerminalRegistration> items):ITerminalDiscovery { public IReadOnlyList<TerminalRegistration> Items=items; public Task<IReadOnlyList<TerminalRegistration>> DiscoverAsync(CancellationToken c=default)=>Task.FromResult(Items); }
+    sealed class ThrowingDiscovery(Exception failure):ITerminalDiscovery { public Task<IReadOnlyList<TerminalRegistration>> DiscoverAsync(CancellationToken c=default)=>Task.FromException<IReadOnlyList<TerminalRegistration>>(failure); }
     sealed class Registry:ITerminalRegistry { public IReadOnlyList<TerminalRegistration> Items=[]; public bool ThrowOnSave; public Task<IReadOnlyList<TerminalRegistration>> LoadAsync(CancellationToken c=default)=>Task.FromResult(Items); public Task SaveAsync(IReadOnlyList<TerminalRegistration> t,CancellationToken c=default){if(ThrowOnSave)throw new IOException("The registry is locked.");Items=t;return Task.CompletedTask;} }
     sealed class Process:ITerminalProcessController { public TerminalRuntimeState State=new(TerminalState.Running,1,null); public bool ThrowStart; public bool Timeout; public StopOutcome? StopOutcome; public int StartCalls; public Task<TerminalRuntimeState> GetStateAsync(TerminalRegistration t,CancellationToken c)=>Task.FromResult(State); public Task<int> StartAsync(TerminalRegistration t,CancellationToken c){StartCalls++;if(ThrowStart)throw new InvalidOperationException("boom");State=new(TerminalState.Running,1,null);return Task.FromResult(1);} public Task<StopResult> StopAsync(TerminalRegistration t,TimeSpan x,bool force,CancellationToken c){var outcome=force?Mt5Manager.Application.Abstractions.StopOutcome.ForceTerminated:StopOutcome??(Timeout?Mt5Manager.Application.Abstractions.StopOutcome.TimedOut:Mt5Manager.Application.Abstractions.StopOutcome.ExitedGracefully);if(outcome is Mt5Manager.Application.Abstractions.StopOutcome.ExitedGracefully or Mt5Manager.Application.Abstractions.StopOutcome.AlreadyStopped or Mt5Manager.Application.Abstractions.StopOutcome.ForceTerminated)State=new(TerminalState.Stopped,null,null);return Task.FromResult(new StopResult(outcome,outcome==Mt5Manager.Application.Abstractions.StopOutcome.Failed?"stop failed":null));} }
     sealed class Inspector:ITerminalStorageInspector { public int Calls; public Task<IReadOnlyList<CategoryUsage>> InspectAsync(TerminalRegistration t,CancellationToken c){Calls++;return Task.FromResult<IReadOnlyList<CategoryUsage>>([new(CleanupCategory.Logs,12,1200)]);} }
     sealed class FailingSecondInspector:ITerminalStorageInspector { int calls; public Task<IReadOnlyList<CategoryUsage>> InspectAsync(TerminalRegistration t,CancellationToken c)=>++calls==1?Task.FromResult<IReadOnlyList<CategoryUsage>>([new(CleanupCategory.Logs,12,1200)]):Task.FromException<IReadOnlyList<CategoryUsage>>(new IOException("inspection failed")); }
-    sealed class BlockingProcess:ITerminalProcessController { public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously); public int Calls; public void Reset(){Started=new(TaskCreationOptions.RunContinuationsAsynchronously);Release=new(TaskCreationOptions.RunContinuationsAsynchronously);Calls=0;} public async Task<TerminalRuntimeState> GetStateAsync(TerminalRegistration t,CancellationToken c){Calls++;Started.TrySetResult();await Release.Task;return new(TerminalState.Running,1,null);} public Task<int> StartAsync(TerminalRegistration t,CancellationToken c)=>Task.FromResult(1); public Task<StopResult> StopAsync(TerminalRegistration t,TimeSpan timeout,bool force,CancellationToken c)=>Task.FromResult(new StopResult(StopOutcome.AlreadyStopped,null)); }
+    sealed class BlockingProcess:ITerminalProcessController { public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously); public int Calls; public void Reset(){Started=new(TaskCreationOptions.RunContinuationsAsynchronously);Release=new(TaskCreationOptions.RunContinuationsAsynchronously);Calls=0;} public async Task<TerminalRuntimeState> GetStateAsync(TerminalRegistration t,CancellationToken c){Calls++;Started.TrySetResult();await Release.Task;c.ThrowIfCancellationRequested();return new(TerminalState.Running,1,null);} public Task<int> StartAsync(TerminalRegistration t,CancellationToken c)=>Task.FromResult(1); public Task<StopResult> StopAsync(TerminalRegistration t,TimeSpan timeout,bool force,CancellationToken c)=>Task.FromResult(new StopResult(StopOutcome.AlreadyStopped,null)); }
     sealed class Cleaner:ITerminalCleanupService { public Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(TerminalRegistration t,IReadOnlySet<CleanupCategory> c,CancellationToken x)=>Task.FromResult<IReadOnlyList<CleanupCategoryResult>>([new(CleanupCategory.Logs,11,1100,[new("locked","denied")])]); }
     sealed class BlockingCleaner:ITerminalCleanupService { public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously); public int Calls; public async Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(TerminalRegistration t,IReadOnlySet<CleanupCategory> c,CancellationToken x){Calls++;Started.SetResult();await Release.Task;return [];} }
     sealed class Audit:IAuditLogger { public List<AuditRecord> Records=[]; public Task AppendAsync(AuditRecord r,CancellationToken c=default){Records.Add(r);return Task.CompletedTask;} public Task<IReadOnlyList<AuditRecord>> ReadAsync(Guid terminalId,int limit=100,CancellationToken c=default)=>Task.FromResult<IReadOnlyList<AuditRecord>>([..Records.Where(x=>x.TerminalId==terminalId).OrderByDescending(x=>x.Timestamp).Take(limit)]); }

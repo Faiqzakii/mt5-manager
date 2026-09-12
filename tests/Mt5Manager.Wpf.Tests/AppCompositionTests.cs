@@ -45,6 +45,17 @@ public sealed class AppCompositionTests
     }
 
     [Fact]
+    public async Task ApplicationLifetime_StopDoesNotWaitForeverForNonCooperativeInnerService()
+    {
+        var bot = new NonCooperativeBotService();
+        var lifetime = new TelegramApplicationLifetime(bot, TimeSpan.FromMilliseconds(25));
+
+        await lifetime.StopAsync().WaitAsync(TimeSpan.FromSeconds(1));
+
+        bot.StopStarted.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task BoundedBotService_DisposeDoesNotWaitForeverForNonCooperativeInnerService()
     {
         var inner = new NonCooperativeBotService();
@@ -58,11 +69,16 @@ public sealed class AppCompositionTests
 
     sealed class NonCooperativeBotService : ITelegramBotService
     {
+        public bool StopStarted { get; private set; }
         public bool DisposeStarted { get; private set; }
         public TelegramBotState State => TelegramBotState.Stopped;
         public event EventHandler? StateChanged { add { } remove { } }
         public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task StopAsync(CancellationToken cancellationToken = default)
+        {
+            StopStarted = true;
+            return Task.Delay(Timeout.InfiniteTimeSpan);
+        }
         public Task ApplySettingsAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public ValueTask DisposeAsync()
         {
