@@ -53,7 +53,7 @@ public sealed class TelegramBotApiClientTests
     [Fact]
     public async Task Send_and_edit_serialize_inline_keyboard()
     {
-        var handler = new FakeHandler(Response(HttpStatusCode.OK, Success), Response(HttpStatusCode.OK, Success));
+        var handler = new FakeHandler(Response(HttpStatusCode.OK, """{"ok":true,"result":{"message_id":9,"chat":{"id":99}}}"""), Response(HttpStatusCode.OK, Success));
         var sut = Create(handler);
         var message = new TelegramMessage("Status", new TelegramKeyboard([
             [new TelegramButton("Refresh", "refresh"), new TelegramButton("ON", "on:1")]
@@ -131,6 +131,24 @@ public sealed class TelegramBotApiClientTests
         error.Which.RetryAfter.Should().Be(TimeSpan.FromSeconds(7));
         AssertTokenSafe(error.Which);
     }
+
+    [Theory]
+    [InlineData(HttpStatusCode.BadRequest, TelegramApiErrorKind.Api, TelegramBotErrorKind.Permanent)]
+    [InlineData(HttpStatusCode.Forbidden, TelegramApiErrorKind.Unauthorized, TelegramBotErrorKind.Unauthorized)]
+    [InlineData(HttpStatusCode.ServiceUnavailable, TelegramApiErrorKind.Transient, TelegramBotErrorKind.Transient)]
+    public async Task Bot_error_kind_maps_api_classification(HttpStatusCode status,
+        TelegramApiErrorKind expectedKind, TelegramBotErrorKind expectedBotKind)
+    {
+        var handler = new FakeHandler(Response(status,
+            $$"""{"ok":false,"error_code":{{(int)status}},"description":"Telegram error"}"""));
+        var sut = Create(handler);
+
+        var error = await FluentActions.Awaiting(() => sut.GetUpdatesAsync(Token, 0)).Should().ThrowAsync<TelegramApiException>();
+
+        error.Which.Kind.Should().Be(expectedKind);
+        error.Which.BotErrorKind.Should().Be(expectedBotKind);
+        AssertTokenSafe(error.Which);
+    }
     [Fact]
     public async Task Api_error_malformed_json_and_network_error_are_typed_and_token_safe()
     {
@@ -143,6 +161,7 @@ public sealed class TelegramBotApiClientTests
         var api = await FluentActions.Awaiting(() => sut.GetUpdatesAsync(Token, 0)).Should().ThrowAsync<TelegramApiException>();
         api.Which.Description.Should().Be("Invalid token [REDACTED]");
         api.Which.Kind.Should().Be(TelegramApiErrorKind.Api);
+        api.Which.BotErrorKind.Should().Be(TelegramBotErrorKind.Permanent);
         AssertTokenSafe(api.Which);
 
         var malformed = await FluentActions.Awaiting(() => sut.GetUpdatesAsync(Token, 0)).Should().ThrowAsync<TelegramApiException>();

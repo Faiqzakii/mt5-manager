@@ -39,11 +39,20 @@ public static class TelegramDashboard
         return Confirmation($"{Label(terminal)}\nStatus saat ini: {current}\nStatus diminta: {requested}\nLanjutkan?", sessionToken);
     }
 
-    public static TelegramMessage ConfirmAll(bool enable, int terminalCount, string sessionToken)
+    public static TelegramMessage ConfirmAll(bool enable, IReadOnlyList<TelegramTerminal> terminals, string sessionToken)
     {
-        if (terminalCount < 0) throw new ArgumentOutOfRangeException(nameof(terminalCount));
-        return Confirmation($"{Action(enable)} Algo Trading untuk semua {terminalCount} terminal?", sessionToken);
+        ArgumentNullException.ThrowIfNull(terminals);
+        var header = $"{Action(enable)} Algo Trading untuk semua {terminals.Count} terminal?";
+        var text = terminals.Count == 0
+            ? header
+            : string.Join("\n", [header, .. terminals.Select(BulkTarget)]);
+        return Confirmation(text, sessionToken);
     }
+
+    public static TelegramMessage Processing(bool enable, int terminalCount) =>
+        new($"{Action(enable)} Algo Trading untuk {terminalCount} terminal sedang diproses…", EmptyKeyboard);
+
+    public static TelegramMessage Cancelled() => new("Dibatalkan.", EmptyKeyboard);
 
     public static IReadOnlyList<string> Results(IReadOnlyList<TelegramTerminalResult> results)
     {
@@ -107,6 +116,9 @@ public static class TelegramDashboard
     private static string Label(TelegramTerminal terminal) =>
         $"{terminal.Name} — {(terminal.IsAvailable ? Login(terminal.Login) : "akun tidak tersedia")}";
     private static string Login(string? login) => string.IsNullOrWhiteSpace(login) ? "akun tidak tersedia" : login;
+    private static string BulkTarget(TelegramTerminal terminal) =>
+        $"• {Label(terminal)} ({State(terminal.CurrentlyEnabled)})";
+    private static string State(bool? enabled) => enabled is null ? "tidak diketahui" : enabled.Value ? "ON" : "OFF";
     private static string Action(bool enable) => enable ? "Aktifkan" : "Nonaktifkan";
     private static TelegramButton Button(string text, string callbackData) => new(text, callbackData);
     private static TelegramKeyboard Keyboard(params IReadOnlyList<TelegramButton>[] rows) => new(rows);

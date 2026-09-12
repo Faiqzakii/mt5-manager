@@ -236,7 +236,7 @@ Expected: FAIL because implementations do not exist.
 
 - [ ] **Step 3: Implement store and DPAPI protector**
 
-Use `%ProgramData%\Mt5Manager\telegram.json`, document version 1, the same create-new/write-through/flush/move pattern as `JsonTerminalRegistry`, and `.corrupt-<UTC timestamp>` preservation. `WindowsUserSecretProtector` uses `ProtectedData.Protect/Unprotect` with `DataProtectionScope.CurrentUser`, UTF-8, and a fixed application entropy byte string. Add `System.Security.Cryptography.ProtectedData` only if the target framework does not expose it without a package.
+Use `%LocalAppData%\Mt5Manager\telegram.json`, document version 1, the same create-new/write-through/flush/move pattern as `JsonTerminalRegistry`, and `.corrupt-<UTC timestamp>` preservation. This per-user path matches the DPAPI `CurrentUser` secret scope. `WindowsUserSecretProtector` uses `ProtectedData.Protect/Unprotect` with `DataProtectionScope.CurrentUser`, UTF-8, and a fixed application entropy byte string. Add `System.Security.Cryptography.ProtectedData` only if the target framework does not expose it without a package.
 
 - [ ] **Step 4: Run focused tests**
 
@@ -418,7 +418,7 @@ Do not use production trading accounts for this smoke test. If real Telegram cre
 
 - [ ] **Step 5: Cleanup and final checks**
 
-Remove any throwaway bot credentials, fake handlers, or local settings generated for smoke verification. Confirm `%ProgramData%\Mt5Manager\telegram.json` contains only protected token material. Update existing user-facing help text in the settings dialog if the observed workflow differs; do not create additional documentation unless requested.
+Remove any throwaway bot credentials, fake handlers, or local settings generated for smoke verification. Confirm `%LocalAppData%\Mt5Manager\telegram.json` contains only protected token material. Update existing user-facing help text in the settings dialog if the observed workflow differs; do not create additional documentation unless requested.
 
 Run: `dotnet build Mt5Manager.sln --configuration Release`
 

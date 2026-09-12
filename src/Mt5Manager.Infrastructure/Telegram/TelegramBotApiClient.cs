@@ -36,6 +36,7 @@ public sealed class TelegramApiException : Exception, ITelegramBotApiError
     {
         TelegramApiErrorKind.Unauthorized => TelegramBotErrorKind.Unauthorized,
         TelegramApiErrorKind.RateLimited => TelegramBotErrorKind.RateLimited,
+        TelegramApiErrorKind.Api => TelegramBotErrorKind.Permanent,
         _ => TelegramBotErrorKind.Transient
     };
     public HttpStatusCode? StatusCode { get; }
@@ -78,12 +79,12 @@ public sealed class TelegramBotApiClient(HttpClient httpClient) : ITelegramBotAp
         return results.Select(MapUpdate).ToArray();
     }
 
-    public Task SendMessageAsync(
+    public async Task<long> SendMessageAsync(
         string botToken,
         long chatId,
         TelegramMessage message,
         CancellationToken cancellationToken = default) =>
-        PostWithoutResultAsync(botToken, "sendMessage", CreateMessagePayload(chatId, null, message), cancellationToken);
+        (await PostAsync<MessageResult>(botToken, "sendMessage", CreateMessagePayload(chatId, null, message), cancellationToken)).MessageId;
 
     public Task EditMessageAsync(
         string botToken,
@@ -186,7 +187,7 @@ public sealed class TelegramBotApiClient(HttpClient httpClient) : ITelegramBotAp
     {
         var kind = statusCode switch
         {
-            HttpStatusCode.Unauthorized => TelegramApiErrorKind.Unauthorized,
+            HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => TelegramApiErrorKind.Unauthorized,
             (HttpStatusCode)429 => TelegramApiErrorKind.RateLimited,
             >= HttpStatusCode.InternalServerError => TelegramApiErrorKind.Transient,
             _ => TelegramApiErrorKind.Api

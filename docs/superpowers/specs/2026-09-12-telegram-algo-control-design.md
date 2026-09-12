@@ -52,7 +52,7 @@ Connection states are Nonaktif, Menghubungkan, Aktif sebagai `@bot_name`, Token/
 
 Test Connection validates the token with Telegram `getMe` and sends a test message to the configured Chat ID. It does not persist values or start long polling. Save validates first, stops the previous polling session, atomically persists the new settings, and starts a new session only when enabled. Remove Configuration requires confirmation, stops polling, and deletes the stored secret and Chat ID.
 
-The bot token is encrypted with Windows DPAPI for the current Windows user before persistence. Plaintext token values must not enter logs, audit records, exception messages, callback data, or UI status text. Settings use versioned JSON and temporary-file atomic replacement under `%ProgramData%\Mt5Manager`, following existing persistence conventions.
+The bot token is encrypted with Windows DPAPI for the current Windows user before persistence. Plaintext token values must not enter logs, audit records, exception messages, callback data, or UI status text. Settings use versioned JSON and temporary-file atomic replacement under `%LocalAppData%\Mt5Manager`, matching the current-user secret scope and preventing another Windows user from accessing or deleting the encrypted token.
 
 ## Architecture
 

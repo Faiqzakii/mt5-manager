@@ -16,7 +16,7 @@ public partial class TelegramSettingsDialog : Window
         this.viewModel = viewModel;
         DataContext = viewModel;
         viewModel.PropertyChanged += ViewModel_PropertyChanged;
-        Loaded += async (_, _) => await viewModel.LoadAsync(lifetime.Token);
+        Loaded += async (_, _) => { viewModel.AttachToBotState(); await viewModel.LoadAsync(lifetime.Token); };
     }
 
     void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -53,6 +53,7 @@ public partial class TelegramSettingsDialog : Window
     void Window_Closing(object? sender, CancelEventArgs e)
     {
         lifetime.Cancel();
+        viewModel.Dispose();
         viewModel.PropertyChanged -= ViewModel_PropertyChanged;
         TokenBox.Clear();
         viewModel.ClearSecret();

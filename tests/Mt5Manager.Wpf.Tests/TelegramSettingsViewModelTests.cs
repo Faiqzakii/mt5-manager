@@ -82,11 +82,12 @@ public sealed class TelegramSettingsViewModelTests
         fixture.Api.Events.Should().Equal("getMe", "send:42");
         fixture.Store.Events.Should().BeEmpty();
         fixture.Bot.Events.Should().BeEmpty();
-        fixture.ViewModel.Status.Should().Contain("connected").And.Contain("test_bot");
+        fixture.ViewModel.ConnectionStatus.Should().Be("Aktif sebagai @test_bot");
+        fixture.ViewModel.Status.Should().Be("Test message sent.");
     }
 
     [Fact]
-    public async Task Save_protects_and_persists_before_applying_settings()
+    public async Task Save_stops_poller_before_protecting_and_persisting_settings()
     {
         var timeline = new List<string>();
         var fixture = new Fixture(timeline: timeline);
@@ -96,9 +97,9 @@ public sealed class TelegramSettingsViewModelTests
 
         (await fixture.ViewModel.SaveAsync()).Should().BeTrue();
 
-        timeline.Should().Equal("protect", "save", "apply");
+        timeline.Should().Equal("stop", "protect", "save", "start");
         fixture.Store.Saved.Should().Be(new TelegramSettings(new ProtectedTelegramToken("ciphertext"), 42, 0, true));
-        fixture.Bot.StartCalls.Should().Be(0);
+        fixture.Bot.StartCalls.Should().Be(1);
     }
 
     [Fact]
@@ -116,7 +117,7 @@ public sealed class TelegramSettingsViewModelTests
         fixture.ViewModel.CanMutate.Should().BeTrue();
         fixture.ViewModel.Status.Should().NotContain(Token);
         fixture.ViewModel.ValidationMessage.Should().NotContain(Token);
-        fixture.ViewModel.Status.Should().Contain("failed");
+        fixture.ViewModel.ConnectionStatus.Should().Be("Gangguan koneksi — mencoba kembali");
     }
 
     [Fact]
@@ -130,10 +131,43 @@ public sealed class TelegramSettingsViewModelTests
         await fixture.ViewModel.RemoveConfirmedAsync();
 
         fixture.Store.Events.Should().Equal("remove");
-        fixture.Bot.Events.Should().Equal("apply");
+        fixture.Bot.Events.Should().Equal("stop");
         fixture.ViewModel.BotToken.Should().BeEmpty();
         fixture.ViewModel.AllowedChatId.Should().BeEmpty();
         fixture.ViewModel.Enabled.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Save_preserves_persisted_update_offset()
+    {
+        var fixture = new Fixture(new TelegramSettings(new ProtectedTelegramToken("old"), 42, 77, true));
+        fixture.ViewModel.Enabled = true;
+        fixture.ViewModel.BotToken = Token;
+        fixture.ViewModel.AllowedChatId = "42";
+        await fixture.ViewModel.LoadAsync();
+
+        (await fixture.ViewModel.SaveAsync()).Should().BeTrue();
+
+        fixture.Store.Saved!.UpdateOffset.Should().Be(77);
+    }
+
+    [Fact]
+    public async Task Bot_state_changes_update_connection_status()
+    {
+        var fixture = new Fixture(new TelegramSettings(new ProtectedTelegramToken("old"), 42, 0, true));
+        await fixture.ViewModel.LoadAsync();
+        fixture.ViewModel.AttachToBotState();
+        fixture.ViewModel.ConnectionStatus.Should().Be("Menghubungkan");
+
+        fixture.Bot.SetState(TelegramBotState.Running);
+        fixture.ViewModel.ConnectionStatus.Should().Be("Aktif");
+
+        fixture.Bot.SetState(TelegramBotState.Unauthorized);
+        fixture.ViewModel.ConnectionStatus.Should().Be("Token/Chat ID tidak valid");
+
+        fixture.ViewModel.Dispose();
+        fixture.Bot.SetState(TelegramBotState.Stopped);
+        fixture.ViewModel.ConnectionStatus.Should().Be("Token/Chat ID tidak valid");
     }
 
     [Theory]
@@ -146,7 +180,7 @@ public sealed class TelegramSettingsViewModelTests
         fixture.ViewModel.BotToken = Token;
         fixture.ViewModel.AllowedChatId = "42";
         if (storeFails) fixture.Store.RemoveException = new InvalidOperationException($"failed {Token}");
-        else fixture.Bot.ApplyException = new InvalidOperationException($"failed {Token}");
+        else fixture.Bot.StopException = new InvalidOperationException($"failed {Token}");
 
         var removed = await fixture.ViewModel.RemoveConfirmedAsync();
 
@@ -270,7 +304,7 @@ public sealed class TelegramSettingsViewModelTests
             if (AfterConnection is not null) await AfterConnection.Task;
             return new(true, "test_bot", 0, null);
         }
-        public Task SendMessageAsync(string botToken, long chatId, TelegramMessage message, CancellationToken cancellationToken = default) { Events.Add($"send:{chatId}"); return Task.CompletedTask; }
+        public Task<long> SendMessageAsync(string botToken, long chatId, TelegramMessage message, CancellationToken cancellationToken = default) { Events.Add($"send:{chatId}"); return Task.FromResult(1L); }
         public Task<IReadOnlyList<TelegramUpdate>> GetUpdatesAsync(string botToken, long offset, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task EditMessageAsync(string botToken, long chatId, long messageId, TelegramMessage message, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task AnswerCallbackAsync(string botToken, string callbackQueryId, string? text = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
@@ -278,16 +312,15 @@ public sealed class TelegramSettingsViewModelTests
 
     sealed class Bot(List<string> timeline) : ITelegramBotService
     {
-        public TelegramBotState State => TelegramBotState.Stopped;
-#pragma warning disable CS0067 // Required interface member is intentionally unused by this test double.
+        public TelegramBotState State { get; private set; } = TelegramBotState.Stopped;
         public event EventHandler? StateChanged;
-#pragma warning restore CS0067
         public List<string> Events { get; } = [];
-        public Exception? ApplyException { get; set; }
+        public Exception? StopException { get; set; }
         public int StartCalls { get; private set; }
-        public Task StartAsync(CancellationToken cancellationToken = default) { StartCalls++; Events.Add("start"); return Task.CompletedTask; }
-        public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task ApplySettingsAsync(CancellationToken cancellationToken = default) { Events.Add("apply"); timeline.Add("apply"); return ApplyException is null ? Task.CompletedTask : Task.FromException(ApplyException); }
+        public Task StartAsync(CancellationToken cancellationToken = default) { StartCalls++; Events.Add("start"); timeline.Add("start"); return Task.CompletedTask; }
+        public Task StopAsync(CancellationToken cancellationToken = default) { Events.Add("stop"); timeline.Add("stop"); return StopException is null ? Task.CompletedTask : Task.FromException(StopException); }
+        public Task ApplySettingsAsync(CancellationToken cancellationToken = default) { Events.Add("apply"); timeline.Add("apply"); return Task.CompletedTask; }
+        public void SetState(TelegramBotState state) { State = state; StateChanged?.Invoke(this, EventArgs.Empty); }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

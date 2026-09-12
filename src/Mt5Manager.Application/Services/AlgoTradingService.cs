@@ -6,6 +6,7 @@ namespace Mt5Manager.Application.Services;
 public sealed class AlgoTradingService : IAlgoTradingService
 {
     private const string UnknownTerminalName = "Unknown terminal";
+    private const string SafeFailureMessage = "The operation could not be completed because of a local error.";
     private static readonly SemaphoreSlim OperationGate = new(1, 1);
 
     private readonly ITerminalRegistry registry;
@@ -51,10 +52,10 @@ public sealed class AlgoTradingService : IAlgoTradingService
             {
                 throw;
             }
-            catch (Exception exception)
+            catch (Exception)
             {
                 await AppendAuditAsync(request, terminal.DisplayName,
-                    new AlgoTradingControlResult(false, exception.Message, null), cancellationToken);
+                    new AlgoTradingControlResult(false, SafeFailureMessage, null), cancellationToken);
                 throw;
             }
 

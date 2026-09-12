@@ -7,8 +7,11 @@ public sealed partial class TelegramSettingsViewModel(
     ITelegramSettingsStore store,
     ISecretProtector protector,
     ITelegramBotApi api,
-    ITelegramBotService botService) : ObservableObject
+    ITelegramBotService botService) : ObservableObject, IDisposable
 {
+    private TelegramSettings? loadedSettings;
+    private SynchronizationContext? stateContext;
+
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CanMutate))]
     bool isBusy;
@@ -28,6 +31,9 @@ public sealed partial class TelegramSettingsViewModel(
     [ObservableProperty]
     string? validationMessage;
 
+    [ObservableProperty]
+    string connectionStatus = "Nonaktif";
+
     public bool CanMutate => !IsBusy;
 
     public async Task LoadAsync(CancellationToken cancellationToken = default)
@@ -39,10 +45,12 @@ public sealed partial class TelegramSettingsViewModel(
             ValidationMessage = null;
             var settings = await store.LoadAsync(cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
+            loadedSettings = settings;
             if (settings is null)
             {
                 ClearEditor();
                 Status = "No Telegram bot configuration is saved.";
+                UpdateConnectionStatus();
                 return;
             }
 
@@ -50,6 +58,7 @@ public sealed partial class TelegramSettingsViewModel(
             AllowedChatId = settings.AllowedChatId.ToString(System.Globalization.CultureInfo.InvariantCulture);
             BotToken = protector.Unprotect(settings.BotToken);
             Status = "Telegram bot configuration loaded. Token is hidden.";
+            UpdateConnectionStatus();
         }
         catch (OperationCanceledException)
         {
@@ -74,19 +83,22 @@ public sealed partial class TelegramSettingsViewModel(
             IsBusy = true;
             ValidationMessage = null;
             Status = "Testing Telegram connection…";
+            ConnectionStatus = "Menghubungkan";
             var connection = await api.GetConnectionStateAsync(token, cancellationToken);
             if (!connection.IsConnected)
             {
                 Status = "Connection failed. Verify the bot token and try again.";
+                ConnectionStatus = "Token/Chat ID tidak valid";
                 return;
             }
 
             cancellationToken.ThrowIfCancellationRequested();
             await api.SendMessageAsync(token, chatId,
                 new TelegramMessage("MT5 Manager connection test succeeded.", new TelegramKeyboard([])), cancellationToken);
-            Status = connection.BotUsername is { Length: > 0 }
-                ? $"connected as @{connection.BotUsername}; test message sent."
-                : "Telegram connected; test message sent.";
+            ConnectionStatus = connection.BotUsername is { Length: > 0 }
+                ? $"Aktif sebagai @{connection.BotUsername.TrimStart('@')}"
+                : "Aktif";
+            Status = "Test message sent.";
         }
         catch (OperationCanceledException)
         {
@@ -94,6 +106,7 @@ public sealed partial class TelegramSettingsViewModel(
         catch
         {
             Status = "Connection test failed. Verify the token, Chat ID, and network connection.";
+            ConnectionStatus = "Gangguan koneksi — mencoba kembali";
         }
         finally
         {
@@ -108,10 +121,13 @@ public sealed partial class TelegramSettingsViewModel(
         {
             IsBusy = true;
             ValidationMessage = null;
-            var settings = new TelegramSettings(protector.Protect(BotToken), chatId, 0, Enabled);
+            await botService.StopAsync(cancellationToken);
+            var settings = new TelegramSettings(protector.Protect(BotToken), chatId, loadedSettings?.UpdateOffset ?? 0, Enabled);
             await store.SaveAsync(settings, cancellationToken);
-            await botService.ApplySettingsAsync(cancellationToken);
+            loadedSettings = settings;
+            await botService.StartAsync(cancellationToken);
             Status = "Telegram bot configuration saved and applied.";
+            UpdateConnectionStatus();
             return true;
         }
         catch (OperationCanceledException)
@@ -137,10 +153,12 @@ public sealed partial class TelegramSettingsViewModel(
         {
             IsBusy = true;
             ValidationMessage = null;
+            await botService.StopAsync(cancellationToken);
             await store.RemoveAsync(cancellationToken);
-            await botService.ApplySettingsAsync(cancellationToken);
+            loadedSettings = null;
             ClearEditor();
             Status = "Telegram bot configuration removed.";
+            UpdateConnectionStatus();
             return true;
         }
         catch (OperationCanceledException)
@@ -186,5 +204,31 @@ public sealed partial class TelegramSettingsViewModel(
         Enabled = false;
         BotToken = "";
         AllowedChatId = "";
+    }
+
+    public void AttachToBotState()
+    {
+        botService.StateChanged -= OnBotStateChanged;
+        stateContext = SynchronizationContext.Current;
+        botService.StateChanged += OnBotStateChanged;
+        UpdateConnectionStatus();
+    }
+
+    void UpdateConnectionStatus() =>
+        ConnectionStatus = botService.State switch
+        {
+            TelegramBotState.Running => "Aktif",
+            TelegramBotState.Unauthorized => "Token/Chat ID tidak valid",
+            _ => loadedSettings is { Enabled: true } ? "Menghubungkan" : "Nonaktif"
+        };
+
+    public void Dispose() => botService.StateChanged -= OnBotStateChanged;
+
+    void OnBotStateChanged(object? sender, EventArgs e)
+    {
+        if (stateContext is { } context && SynchronizationContext.Current != context)
+            context.Post(_ => UpdateConnectionStatus(), null);
+        else
+            UpdateConnectionStatus();
     }
 }

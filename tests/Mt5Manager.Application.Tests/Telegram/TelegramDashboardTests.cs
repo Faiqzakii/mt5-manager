@@ -61,12 +61,19 @@ public sealed class TelegramDashboardTests
     public void Confirmations_put_only_supplied_token_in_confirm_callbacks()
     {
         var single = TelegramDashboard.ConfirmTerminal(false, true,
-            new TelegramTerminal(FirstId, "Alpha", "12345", true), "S3");
-        var bulk = TelegramDashboard.ConfirmAll(true, 9, "B4");
+            new TelegramTerminal(FirstId, "Alpha", "12345", true, true), "S3");
+        var bulk = TelegramDashboard.ConfirmAll(true,
+        [
+            new TelegramTerminal(FirstId, "Alpha", "12345", true, false),
+            new TelegramTerminal(Guid.NewGuid(), "Beta", null, false, null)
+        ], "B4");
 
         single.Text.Should().Be("Alpha — 12345\nStatus saat ini: ON\nStatus diminta: OFF\nLanjutkan?");
         single.Keyboard.Rows.SelectMany(x => x).Select(x => x.CallbackData).Should().Equal("confirm:S3", "cancel:S3");
-        bulk.Text.Should().Be("Aktifkan Algo Trading untuk semua 9 terminal?");
+        bulk.Text.Should().Be(
+            "Aktifkan Algo Trading untuk semua 2 terminal?\n" +
+            "• Alpha — 12345 (OFF)\n" +
+            "• Beta — akun tidak tersedia (tidak diketahui)");
         bulk.Keyboard.Rows.SelectMany(x => x).Select(x => x.CallbackData).Should().Equal("confirm:B4", "cancel:B4");
     }
 

@@ -31,6 +31,9 @@
                 <Border Style="{StaticResource SubtlePanelStyle}" Margin="0,18,0,0">
                     <StackPanel>
                         <TextBlock Text="Connection status" FontWeight="SemiBold" Foreground="{StaticResource TextSecondaryBrush}"/>
+                        <TextBlock Text="{Binding ConnectionStatus}" TextWrapping="Wrap" Margin="0,4,0,0"
+                                   Foreground="{StaticResource TextSecondaryBrush}" AutomationProperties.Name="Telegram connection state"
+                                   AutomationProperties.LiveSetting="Polite"/>
                         <TextBlock Text="{Binding Status}" TextWrapping="Wrap" Margin="0,4,0,0"
                                    Foreground="{StaticResource TextSecondaryBrush}" AutomationProperties.LiveSetting="Polite"/>
                         <TextBlock Text="{Binding ValidationMessage}" TextWrapping="Wrap" Margin="0,5,0,0"

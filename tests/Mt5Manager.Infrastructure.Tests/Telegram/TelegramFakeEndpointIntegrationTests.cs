@@ -52,6 +52,8 @@ public sealed class TelegramFakeEndpointIntegrationTests : IDisposable
         savedText.Should().Contain("botToken").And.Contain("protected").And.NotContain(BotToken);
 
         var protectedToken = protector.Protect(BotToken);
+        http.SetResponse("getMe", UserResult("mt5_manager_bot"));
+        http.Enqueue("getUpdates", UpdatesResult(new Update(100, new IncomingMessage(ChatId, 1, "/start"), null)));
         await store.SaveAsync(new TelegramSettings(protectedToken, ChatId, 0, true)).WaitAsync(Timeout);
         await bot.StartAsync().WaitAsync(Timeout);
         bot.State.Should().Be(TelegramBotState.Running);
@@ -60,11 +62,14 @@ public sealed class TelegramFakeEndpointIntegrationTests : IDisposable
         persisted!.Enabled.Should().BeTrue();
         protector.Unprotect(persisted.BotToken).Should().Be(BotToken);
 
-        http.SetResponse("getMe", UserResult("mt5_manager_bot"));
-        http.Enqueue("getUpdates", UpdatesResult(new Update(100, new IncomingMessage(ChatId, 1, "/start"), null)));
+        // Initial update was queued before polling started to keep this fake endpoint deterministic.
         await WaitAsync(() => http.Sent.Any(message => message.Text.Contains("Terminal: 2")));
-        http.Enqueue("getUpdates", UpdatesResult(new Update(101, new IncomingMessage(ChatId, 2, "/onall"), null)));
-        await WaitAsync(() => http.Sent.Any(message => message.Text.Contains("Aktifkan Algo Trading untuk semua 2 terminal?")));
+        http.Enqueue("getUpdates", UpdatesResult(new Update(101, new IncomingMessage(ChatId, 2, "/on_all"), null)));
+        await WaitAsync(() => http.Sent.Count >= 2);
+        http.Sent.Should().Contain(message =>
+            message.Text.Contains("Aktifkan Algo Trading untuk semua 2 terminal?") &&
+            message.Text.Contains("Alpha — 111 (OFF)") &&
+            message.Text.Contains("Bravo — akun tidak tersedia (tidak diketahui)"));
         http.Sent.Should().Contain(message =>
             message.Keyboard.Rows.Count == 3 &&
             message.Keyboard.Rows[0][0].CallbackData == "status" &&
@@ -76,19 +81,22 @@ public sealed class TelegramFakeEndpointIntegrationTests : IDisposable
         var confirmation = http.Sent.First(message => message.Text.Contains("Aktifkan Algo Trading untuk semua 2 terminal?")).Keyboard.Rows[0][0].CallbackData;
         confirmation.Should().StartWith("confirm:");
 
-        http.Enqueue("getUpdates", UpdatesResult(new Update(102, null, new CallbackQuery("answer", ChatId, 2, confirmation))));
+        http.Enqueue("getUpdates", UpdatesResult(new Update(102, null, new CallbackQuery("answer", ChatId, 9, confirmation))));
         await WaitAsync(() => http.Calls.Any(call => call.Method == "answerCallbackQuery" && call.CallbackId == "answer"));
-        await WaitAsync(() => algo.Requests.Count == 1);
-        algo.Requests.Should().ContainSingle(request => request.TerminalId == alphaId && request.Enable && request.Source == AlgoOperationSource.Telegram);
+        await WaitAsync(() => algo.Requests.Count == 2);
+        algo.Requests.Should().Contain(request => request.TerminalId == alphaId && request.Enable && request.Source == AlgoOperationSource.Telegram);
+        await WaitAsync(() => http.Edited.Any(message => message.Text.Contains("sedang diproses")),
+            $"no in-progress edit; edited={string.Join(" | ", http.Edited.Select(message => message.Text))}");
         await WaitAsync(() =>
             http.Sent.Any(message => message.Text.Contains("Berhasil") && message.Text.Contains("Alpha — 111")) &&
-            http.Sent.Any(message => message.Text.Contains("Gagal") && message.Text.Contains("Bravo") && message.Text.Contains("akun tidak tersedia")),
-            $"no bulk result; sent={string.Join(" | ", http.Sent.Select(message => message.Text))}; algo={algo.Requests.Count}");
+            http.Sent.Any(message => message.Text.Contains("Gagal") && message.Text.Contains("Bravo") && message.Text.Contains("akun tidak tersedia")) &&
+            http.Sent.Any(message => message.Text.Contains("Status: Terhubung")),
+            $"no bulk result or refreshed dashboard; sent={string.Join(" | ", http.Sent.Select(message => message.Text))}; algo={algo.Requests.Count}");
 
         http.Enqueue("getUpdates", UpdatesResult(new Update(103, null, new CallbackQuery("replay", ChatId, 2, confirmation))));
         await WaitAsync(() => http.Calls.Any(call => call.Method == "answerCallbackQuery" && call.CallbackId == "replay"));
         await WaitAsync(() => http.Sent.Any(message => message.Text.Contains("Konfirmasi tidak valid atau kedaluwarsa.")));
-        algo.Requests.Should().ContainSingle();
+        algo.Requests.Should().HaveCount(2);
 
         await bot.StopAsync().WaitAsync(Timeout);
         bot.State.Should().Be(TelegramBotState.Stopped);
@@ -177,6 +185,7 @@ public sealed class TelegramFakeEndpointIntegrationTests : IDisposable
         private readonly object gate = new();
         private readonly Dictionary<string, string> methodResponses = new();
         private readonly Queue<(string Method, string Response)> responses = new();
+        private readonly SemaphoreSlim queuedResponses = new(0);
         private readonly List<(string Method, string? CallbackId)> calls = [];
         private readonly List<TelegramMessage> sent = [];
         private readonly List<TelegramMessage> edited = [];
@@ -205,6 +214,7 @@ public sealed class TelegramFakeEndpointIntegrationTests : IDisposable
         public void Enqueue(string method, string response)
         {
             lock (gate) responses.Enqueue((method, response));
+            queuedResponses.Release();
         }
 
         public void SetResponse(string method, string response)
@@ -238,6 +248,8 @@ public sealed class TelegramFakeEndpointIntegrationTests : IDisposable
                     }
                 }
             }
+            if (method == "getUpdates")
+                await queuedResponses.WaitAsync(cancellationToken);
 
             string? response;
             lock (gate)
@@ -245,12 +257,15 @@ public sealed class TelegramFakeEndpointIntegrationTests : IDisposable
                 requests.Add(uri);
                 calls.Add((method, callbackId));
 
-                if (responses.TryDequeue(out var queued) && queued.Method == method)
-                    response = queued.Response!;
+                if (responses.TryPeek(out var queued) && queued.Method == method)
+                {
+                    responses.Dequeue();
+                    response = queued.Response;
+                }
                 else if (!methodResponses.TryGetValue(method, out response))
-                    response = method is "sendMessage" or "editMessageText" or "answerCallbackQuery"
-                        ? """{"ok":true,"result":true}"""
-                        : """{"ok":true,"result":[]}""";
+                    response = method == "sendMessage"
+                        ? """{"ok":true,"result":{"message_id":9,"chat":{"id":42}}}"""
+                        : method is "editMessageText" or "answerCallbackQuery" ? """{"ok":true,"result":true}""" : """{"ok":true,"result":[]}""";
             }
 
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(response!, Encoding.UTF8, "application/json") };
