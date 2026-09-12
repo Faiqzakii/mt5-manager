@@ -24,7 +24,8 @@ public sealed record AuditRecord(
     string? Message,
     IReadOnlyList<AuditCategoryOutcome> CategoryOutcomes,
     bool Restarted,
-    string? RestartError);
+    string? RestartError,
+    AlgoOperationSource? Source = null);
 
 public interface IAuditLogger
 {
