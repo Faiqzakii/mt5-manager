@@ -22,7 +22,7 @@ public sealed class JsonTelegramSettingsStore : ITelegramSettingsStore
             await using (var stream = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.Read))
                 document = await JsonSerializer.DeserializeAsync<TelegramSettingsDocument>(stream, Options, cancellationToken);
         }
-        catch (FileNotFoundException)
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
         {
             return null;
         }

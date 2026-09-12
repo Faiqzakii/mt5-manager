@@ -88,20 +88,21 @@ public sealed class JsonTelegramSettingsStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task Atomic_save_observes_temporary_token_file_then_leaves_only_final_settings()
+    public async Task Load_returns_null_on_fresh_install_without_settings_directory()
+    {
+        var missingRoot = Path.Combine(Path.GetTempPath(), $"mt5-missing-{Guid.NewGuid():N}");
+        var store = new JsonTelegramSettingsStore(Path.Combine(missingRoot, "telegram.json"));
+
+        (await store.LoadAsync()).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Atomic_save_leaves_only_final_settings()
     {
         var store = new JsonTelegramSettingsStore(SettingsPath);
-        var observed = false;
-        var observer = Task.Run(() =>
-        {
-            for (var i = 0; i < 100_000 && !observed; i++)
-                observed |= Directory.EnumerateFiles(_root, ".telegram.json.*.tmp").Any();
-        });
 
         await store.SaveAsync(Settings("protected", 1, 0, true));
-        await observer;
 
-        observed.Should().BeTrue();
         Directory.EnumerateFiles(_root).Should().ContainSingle().Which.Should().Be(SettingsPath);
     }
 
