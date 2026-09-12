@@ -35,6 +35,8 @@ public sealed partial class TerminalRowViewModel(TerminalRegistration terminal,I
     [RelayCommand(CanExecute=nameof(CanDisableAlgo))]public async Task DisableAlgoAsync()=>await SetAlgoAsync(false);
     [RelayCommand]public Task RefreshStateAsync()=>RefreshStateAsync(CancellationToken.None);
     public async Task RefreshStateAsync(CancellationToken token)=>await Run(async()=>{var s=await process.GetStateAsync(terminal,token);State=s.State;ProcessId=s.ProcessId;Error=s.Error;if(runtime is not null){Account=await runtime.ReadAsync(terminal,token);ProjectRuntimeState();}},token);
+    public void ApplyStorageInspection(IReadOnlyList<CategoryUsage> usage)=>StorageSummary=string.Join(" · ",usage.Select(x=>$"{x.Category}: {x.FileCount:N0} files, {x.Bytes:N0} bytes"));
+    public void ApplyCleanupResult(string result)=>LastResult=result;
     async Task SetAlgoAsync(bool enable)=>await Run(async()=>{var result=await algo!.SetAsync(terminal,enable,CancellationToken.None);if(result.Snapshot is not null){Account=result.Snapshot;ProjectRuntimeState();}if(!result.Success)throw new InvalidOperationException(result.Message);LastResult=result.Message;});
     void ProjectRuntimeState(){var a=Account;AccountSummary=a is null?"Bridge unavailable":$"{a.Login} · {a.AccountName} · {a.Server} · {a.TradeMode}";AlgoSummary=a is null?"Algo Trading unknown":$"Global {a.GlobalAlgoTrading} · EA {(a.EaTradingAllowed?"allowed":"denied")} · Account {(a.AccountTradingAllowed?"allowed":"denied")} · Expert {(a.AccountExpertAllowed?"allowed":"denied")} · {(a.Connected?"connected":"disconnected")}";}
     async Task RefreshActualStateAsync(){var current=await process.GetStateAsync(terminal,CancellationToken.None);State=current.State;ProcessId=current.ProcessId;}

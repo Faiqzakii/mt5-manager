@@ -13,5 +13,5 @@ public partial class MainWindow:Window
  async void Window_Loaded(object sender,RoutedEventArgs e){await viewModel.RefreshAsync();backgroundRefresh.Start();}
  void Window_Closed(object? sender,EventArgs e){backgroundRefresh.Stop();lifetime.Cancel();viewModel.CancelRefresh();lifetime.Dispose();}
  async void Manual_Click(object sender,RoutedEventArgs e){var dialog=new ManualRegistrationDialog{Owner=this};if(dialog.ShowDialog()==true&&dialog.Registration is not null)await viewModel.AddManualAsync(dialog.Registration);}
- void Cleanup_Click(object sender,RoutedEventArgs e){if((sender as FrameworkElement)?.DataContext is TerminalRowViewModel row)new CleanupDialog(new CleanupViewModel(row.Terminal,inspector,coordinator)){Owner=this}.ShowDialog();}
+ void Cleanup_Click(object sender,RoutedEventArgs e){if((sender as FrameworkElement)?.DataContext is TerminalRowViewModel row)new CleanupDialog(new CleanupViewModel(row.Terminal,inspector,coordinator,row.ApplyStorageInspection,row.ApplyCleanupResult)){Owner=this}.ShowDialog();}
 }

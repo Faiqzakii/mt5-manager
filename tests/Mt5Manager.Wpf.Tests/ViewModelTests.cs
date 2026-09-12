@@ -25,6 +25,37 @@ public sealed class ViewModelTests
         row.StorageSummary.Should().Be("Storage not inspected");
     }
 
+    [Fact] public async Task On_demand_cleanup_preview_updates_the_originating_row()
+    {
+        var terminal=T(); var inspector=new Inspector(); var row=new TerminalRowViewModel(terminal,new Process());
+        var cleanup=new CleanupViewModel(terminal,inspector,CoordinatorFor(terminal),row.ApplyStorageInspection,row.ApplyCleanupResult);
+        await cleanup.LoadPreviewAsync();
+        row.StorageSummary.Should().Contain("Logs: 12 files").And.Contain("1").And.Contain("200 bytes");
+        row.LastResult.Should().Be("Storage inspected.");
+        await row.RefreshStateAsync();
+        inspector.Calls.Should().Be(1,"automatic state refresh must not scan storage");
+    }
+
+    [Fact] public async Task Completed_cleanup_refreshes_row_storage_and_last_result()
+    {
+        var terminal=T(); var inspector=new Inspector(); var row=new TerminalRowViewModel(terminal,new Process());
+        var cleanup=new CleanupViewModel(terminal,inspector,CoordinatorFor(terminal,false),row.ApplyStorageInspection,row.ApplyCleanupResult);
+        await cleanup.LoadPreviewAsync(); cleanup.Categories[0].IsSelected=true; cleanup.IsDestructiveConfirmed=true;
+        await cleanup.PrepareAsync(); await cleanup.ContinueAsync(false);
+        inspector.Calls.Should().Be(2,"storage must be inspected again after cleanup");
+        row.LastResult.Should().Be(cleanup.ResultText).And.Contain("Completed");
+    }
+
+    [Fact] public async Task Completed_cleanup_result_reaches_row_when_storage_reinspection_fails()
+    {
+        var terminal=T(); var row=new TerminalRowViewModel(terminal,new Process());
+        var cleanup=new CleanupViewModel(terminal,new FailingSecondInspector(),CoordinatorFor(terminal,false),row.ApplyStorageInspection,row.ApplyCleanupResult);
+        await cleanup.LoadPreviewAsync(); cleanup.Categories[0].IsSelected=true; cleanup.IsDestructiveConfirmed=true;
+        await cleanup.PrepareAsync(); await cleanup.ContinueAsync(false);
+        row.LastResult.Should().Contain("Completed");
+        cleanup.Error.Should().Be("inspection failed");
+    }
+
     [Fact] public async Task Overlapping_state_refresh_is_skipped()
     {
         var process=new BlockingProcess(); var vm=new MainViewModel(new Discovery([T("Alpha"),T("Beta")]),new Registry(),process);
@@ -243,6 +274,7 @@ public sealed class ViewModelTests
     sealed class Registry:ITerminalRegistry { public IReadOnlyList<TerminalRegistration> Items=[]; public bool ThrowOnSave; public Task<IReadOnlyList<TerminalRegistration>> LoadAsync(CancellationToken c=default)=>Task.FromResult(Items); public Task SaveAsync(IReadOnlyList<TerminalRegistration> t,CancellationToken c=default){if(ThrowOnSave)throw new IOException("The registry is locked.");Items=t;return Task.CompletedTask;} }
     sealed class Process:ITerminalProcessController { public TerminalRuntimeState State=new(TerminalState.Running,1,null); public bool ThrowStart; public bool Timeout; public StopOutcome? StopOutcome; public int StartCalls; public Task<TerminalRuntimeState> GetStateAsync(TerminalRegistration t,CancellationToken c)=>Task.FromResult(State); public Task<int> StartAsync(TerminalRegistration t,CancellationToken c){StartCalls++;if(ThrowStart)throw new InvalidOperationException("boom");State=new(TerminalState.Running,1,null);return Task.FromResult(1);} public Task<StopResult> StopAsync(TerminalRegistration t,TimeSpan x,bool force,CancellationToken c){var outcome=force?Mt5Manager.Application.Abstractions.StopOutcome.ForceTerminated:StopOutcome??(Timeout?Mt5Manager.Application.Abstractions.StopOutcome.TimedOut:Mt5Manager.Application.Abstractions.StopOutcome.ExitedGracefully);if(outcome is Mt5Manager.Application.Abstractions.StopOutcome.ExitedGracefully or Mt5Manager.Application.Abstractions.StopOutcome.AlreadyStopped or Mt5Manager.Application.Abstractions.StopOutcome.ForceTerminated)State=new(TerminalState.Stopped,null,null);return Task.FromResult(new StopResult(outcome,outcome==Mt5Manager.Application.Abstractions.StopOutcome.Failed?"stop failed":null));} }
     sealed class Inspector:ITerminalStorageInspector { public int Calls; public Task<IReadOnlyList<CategoryUsage>> InspectAsync(TerminalRegistration t,CancellationToken c){Calls++;return Task.FromResult<IReadOnlyList<CategoryUsage>>([new(CleanupCategory.Logs,12,1200)]);} }
+    sealed class FailingSecondInspector:ITerminalStorageInspector { int calls; public Task<IReadOnlyList<CategoryUsage>> InspectAsync(TerminalRegistration t,CancellationToken c)=>++calls==1?Task.FromResult<IReadOnlyList<CategoryUsage>>([new(CleanupCategory.Logs,12,1200)]):Task.FromException<IReadOnlyList<CategoryUsage>>(new IOException("inspection failed")); }
     sealed class BlockingProcess:ITerminalProcessController { public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously); public int Calls; public void Reset(){Started=new(TaskCreationOptions.RunContinuationsAsynchronously);Release=new(TaskCreationOptions.RunContinuationsAsynchronously);Calls=0;} public async Task<TerminalRuntimeState> GetStateAsync(TerminalRegistration t,CancellationToken c){Calls++;Started.TrySetResult();await Release.Task;return new(TerminalState.Running,1,null);} public Task<int> StartAsync(TerminalRegistration t,CancellationToken c)=>Task.FromResult(1); public Task<StopResult> StopAsync(TerminalRegistration t,TimeSpan timeout,bool force,CancellationToken c)=>Task.FromResult(new StopResult(StopOutcome.AlreadyStopped,null)); }
     sealed class Cleaner:ITerminalCleanupService { public Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(TerminalRegistration t,IReadOnlySet<CleanupCategory> c,CancellationToken x)=>Task.FromResult<IReadOnlyList<CleanupCategoryResult>>([new(CleanupCategory.Logs,11,1100,[new("locked","denied")])]); }
     sealed class BlockingCleaner:ITerminalCleanupService { public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously); public int Calls; public async Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(TerminalRegistration t,IReadOnlySet<CleanupCategory> c,CancellationToken x){Calls++;Started.SetResult();await Release.Task;return [];} }

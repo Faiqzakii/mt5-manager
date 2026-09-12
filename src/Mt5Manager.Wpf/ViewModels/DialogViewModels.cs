@@ -9,12 +9,12 @@ namespace Mt5Manager.Wpf.ViewModels;
 public sealed partial class CleanupCategoryViewModel(CleanupCategory category):ObservableObject { public CleanupCategory Category=>category; [ObservableProperty] bool isSelected; public string Name=>category.ToString(); }
 public sealed partial class CleanupViewModel:ObservableObject
 {
-    readonly TerminalRegistration terminal; readonly ITerminalStorageInspector inspector; readonly TerminalOperationCoordinator coordinator; CleanupPreparation? preparation; CancellationTokenSource preparationCancellation=new();
-    public CleanupViewModel(TerminalRegistration terminal,ITerminalStorageInspector inspector,TerminalOperationCoordinator coordinator){this.terminal=terminal;this.inspector=inspector;this.coordinator=coordinator;Categories=[..Enum.GetValues<CleanupCategory>().Select(x=>new CleanupCategoryViewModel(x))];foreach(var c in Categories)c.PropertyChanged+=(_,_)=>OnPropertyChanged(nameof(CanPrepare));}
+    readonly TerminalRegistration terminal; readonly ITerminalStorageInspector inspector; readonly TerminalOperationCoordinator coordinator; readonly Action<IReadOnlyList<CategoryUsage>>? storageInspected; readonly Action<string>? cleanupCompleted; CleanupPreparation? preparation; CancellationTokenSource preparationCancellation=new();
+    public CleanupViewModel(TerminalRegistration terminal,ITerminalStorageInspector inspector,TerminalOperationCoordinator coordinator,Action<IReadOnlyList<CategoryUsage>>? storageInspected=null,Action<string>? cleanupCompleted=null){this.terminal=terminal;this.inspector=inspector;this.coordinator=coordinator;this.storageInspected=storageInspected;this.cleanupCompleted=cleanupCompleted;Categories=[..Enum.GetValues<CleanupCategory>().Select(x=>new CleanupCategoryViewModel(x))];foreach(var c in Categories)c.PropertyChanged+=(_,_)=>OnPropertyChanged(nameof(CanPrepare));}
     public IReadOnlyList<CleanupCategoryViewModel> Categories{get;} public bool CanPrepare=>terminal.DataDirectoryVerified&&preparation is null&&Categories.Any(x=>x.IsSelected)&&IsDestructiveConfirmed&&!IsBusy; public bool CanContinue=>preparation?.Status==CleanupPreparationStatus.Ready&&!IsBusy; public bool CanForceContinue=>preparation is not null&&!IsBusy;
     [ObservableProperty] string preview="Select categories to preview cleanup."; [ObservableProperty] bool requiresForceConfirmation; [ObservableProperty] string resultText=""; [ObservableProperty] string? error;
     [ObservableProperty][NotifyPropertyChangedFor(nameof(CanPrepare))] bool isDestructiveConfirmed; [ObservableProperty][NotifyPropertyChangedFor(nameof(CanPrepare),nameof(CanContinue),nameof(CanForceContinue))] bool isBusy;
-    public async Task LoadPreviewAsync(){if(!terminal.DataDirectoryVerified){Error="Cleanup requires a verified terminal data directory.";return;}try{IsBusy=true;var usage=await inspector.InspectAsync(terminal,preparationCancellation.Token);Preview=string.Join(Environment.NewLine,usage.Select(x=>$"{x.Category}: {x.FileCount} files, {x.Bytes:N0} bytes"));}catch(OperationCanceledException){}catch(Exception ex){Error=ex.Message;}finally{IsBusy=false;}}
+    public async Task LoadPreviewAsync(){if(!terminal.DataDirectoryVerified){Error="Cleanup requires a verified terminal data directory.";return;}try{IsBusy=true;var usage=await inspector.InspectAsync(terminal,preparationCancellation.Token);Preview=FormatUsage(usage);storageInspected?.Invoke(usage);cleanupCompleted?.Invoke("Storage inspected.");}catch(OperationCanceledException){}catch(Exception ex){Error=ex.Message;}finally{IsBusy=false;}}
     public async Task PrepareAsync()
     {
         if(!CanPrepare)return;
@@ -47,6 +47,7 @@ public sealed partial class CleanupViewModel:ObservableObject
             var outcome=await coordinator.ContinueCleanupAsync(preparation,force,preparationCancellation.Token);
             var failures=outcome.Result.Categories.Sum(x=>x.Failures.Count);
             ResultText=$"{outcome.Status}: {outcome.Result.Categories.Sum(x=>x.DeletedFiles)} deleted, {failures} failed. "+(outcome.Result.Restarted?"Restarted.":outcome.Result.RestartError is null?"Not restarted.":$"Restart failed: {outcome.Result.RestartError}");
+            cleanupCompleted?.Invoke(ResultText);var usage=await inspector.InspectAsync(terminal,preparationCancellation.Token);Preview=FormatUsage(usage);storageInspected?.Invoke(usage);
             Error=outcome.Message;
         }
         catch(OperationCanceledException){}
@@ -55,6 +56,7 @@ public sealed partial class CleanupViewModel:ObservableObject
     }
     public async Task CancelPreparationAsync(){preparationCancellation.Cancel();var pending=preparation;if(pending is not null)await coordinator.CancelPreparationAsync(pending);SetPreparation(null);}
     void SetPreparation(CleanupPreparation? value){preparation=value;if(value is null)RequiresForceConfirmation=false;OnPropertyChanged(nameof(CanContinue));OnPropertyChanged(nameof(CanPrepare));OnPropertyChanged(nameof(CanForceContinue));}
+    static string FormatUsage(IReadOnlyList<CategoryUsage> usage)=>string.Join(Environment.NewLine,usage.Select(x=>$"{x.Category}: {x.FileCount} files, {x.Bytes:N0} bytes"));
 }
 
 public sealed partial class ManualRegistrationViewModel(Func<string,bool>? fileExists=null,Func<string,bool>? directoryExists=null):ObservableObject
