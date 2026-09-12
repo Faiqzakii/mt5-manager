@@ -8,19 +8,44 @@ namespace Mt5Manager.Application.Tests.Services;
 public sealed class AlgoTradingServiceTests
 {
     [Fact]
-    public async Task Resolves_terminal_by_immutable_id_after_entering_operation_gate()
+    public async Task Queued_request_reloads_registry_inside_gate_and_resolves_updated_terminal_by_id()
     {
-        var id = Guid.NewGuid();
-        var current = Registration(id, "Renamed terminal");
-        var registry = new Registry(current);
-        var controller = new Controller(new(true, "enabled", null));
+        var blockingId = Guid.NewGuid();
+        var requestedId = Guid.NewGuid();
+        var otherId = Guid.NewGuid();
+        var original = Registration(requestedId, "Original name");
+        var updated = Registration(requestedId, "Updated name");
+        var registry = new Registry(
+            Registration(blockingId, "Blocking"),
+            Registration(otherId, "Other"),
+            original);
+        var controller = new BlockingController();
         var service = Service(registry, controller, new Audit());
+        var firstCall = service.SetAsync(new(blockingId, true, AlgoOperationSource.Wpf));
+        Task<AlgoTradingOperationResult>? queuedCall = null;
 
-        var result = await service.SetAsync(new(id, true, AlgoOperationSource.Wpf));
+        try
+        {
+            await controller.WaitForEntryAsync();
+            queuedCall = service.SetAsync(new(requestedId, false, AlgoOperationSource.Telegram));
+            registry.Items = [Registration(otherId, "Other renamed"), updated, Registration(blockingId, "Blocking")];
 
-        registry.LoadCalls.Should().Be(1);
-        controller.Terminals.Should().ContainSingle().Which.Should().BeSameAs(current);
-        result.Should().Be(new AlgoTradingOperationResult(id, current.DisplayName, true, controller.Result));
+            await Task.Delay(100);
+            registry.LoadCalls.Should().Be(1, "the queued request cannot load until it enters the gate");
+        }
+        finally
+        {
+            controller.Release();
+            if (queuedCall is not null)
+                await Task.WhenAll(firstCall, queuedCall).WaitAsync(TimeSpan.FromSeconds(5));
+            else
+                await firstCall.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+
+        registry.LoadCalls.Should().Be(2);
+        controller.Terminals.Should().HaveCount(2);
+        controller.Terminals[1].Should().BeSameAs(updated);
+        queuedCall!.Result.TerminalName.Should().Be("Updated name");
     }
 
     [Fact]
@@ -53,15 +78,25 @@ public sealed class AlgoTradingServiceTests
         var controller = new BlockingController();
         var first = Service(new Registry(Registration(firstId, "First")), controller, new Audit());
         var second = Service(new Registry(Registration(secondId, "Second")), controller, new Audit());
-
         var firstCall = first.SetAsync(new(firstId, true, AlgoOperationSource.Wpf));
-        await controller.WaitForEntryAsync();
-        var secondCall = second.SetAsync(new(secondId, false, AlgoOperationSource.Telegram));
-        await Task.Delay(100);
+        Task<AlgoTradingOperationResult>? secondCall = null;
 
-        controller.EntryCount.Should().Be(1);
-        controller.Release();
-        await Task.WhenAll(firstCall, secondCall);
+        try
+        {
+            await controller.WaitForEntryAsync();
+            secondCall = second.SetAsync(new(secondId, false, AlgoOperationSource.Telegram));
+            await Task.Delay(100);
+            controller.EntryCount.Should().Be(1);
+        }
+        finally
+        {
+            controller.Release();
+            if (secondCall is not null)
+                await Task.WhenAll(firstCall, secondCall).WaitAsync(TimeSpan.FromSeconds(5));
+            else
+                await firstCall.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+
         controller.MaxConcurrent.Should().Be(1);
     }
 
@@ -134,9 +169,10 @@ public sealed class AlgoTradingServiceTests
 
     private sealed class Registry(params TerminalRegistration[] terminals) : ITerminalRegistry
     {
+        public IReadOnlyList<TerminalRegistration> Items { get; set; } = terminals;
         public int LoadCalls { get; private set; }
-        public Task<IReadOnlyList<TerminalRegistration>> LoadAsync(CancellationToken cancellationToken = default) { LoadCalls++; return Task.FromResult<IReadOnlyList<TerminalRegistration>>(terminals); }
-        public Task SaveAsync(IReadOnlyList<TerminalRegistration> terminals, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<IReadOnlyList<TerminalRegistration>> LoadAsync(CancellationToken cancellationToken = default) { LoadCalls++; return Task.FromResult(Items); }
+        public Task SaveAsync(IReadOnlyList<TerminalRegistration> terminals, CancellationToken cancellationToken = default) { Items = terminals; return Task.CompletedTask; }
     }
 
     private sealed class Controller(AlgoTradingControlResult result) : ITerminalAlgoTradingController
@@ -165,8 +201,10 @@ public sealed class AlgoTradingServiceTests
         private int concurrent;
         public int EntryCount;
         public int MaxConcurrent;
+        public List<TerminalRegistration> Terminals { get; } = [];
         public async Task<AlgoTradingControlResult> SetAsync(TerminalRegistration terminal, bool enable, CancellationToken cancellationToken = default)
         {
+            lock (Terminals) Terminals.Add(terminal);
             Interlocked.Increment(ref EntryCount);
             var active = Interlocked.Increment(ref concurrent);
             MaxConcurrent = Math.Max(MaxConcurrent, active);
