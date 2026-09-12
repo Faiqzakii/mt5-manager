@@ -25,35 +25,53 @@ public sealed class ViewModelTests
         row.StorageSummary.Should().Be("Storage not inspected");
     }
 
-    [Fact] public async Task On_demand_cleanup_preview_updates_the_originating_row()
+    [Fact] public async Task Explicit_storage_inspection_updates_storage_without_changing_last_operation()
     {
-        var terminal=T(); var inspector=new Inspector(); var row=new TerminalRowViewModel(terminal,new Process());
-        var cleanup=new CleanupViewModel(terminal,inspector,CoordinatorFor(terminal),row.ApplyStorageInspection,row.ApplyCleanupResult);
-        await cleanup.LoadPreviewAsync();
-        row.StorageSummary.Should().Contain("Logs: 12 files").And.Contain("1").And.Contain("200 bytes");
-        row.LastResult.Should().Be("Storage inspected.");
+        var inspector=new Inspector(); var row=new TerminalRowViewModel(T(),new Process(),storage:inspector);
+        await row.InspectStorageAsync();
+        row.StorageSummary.Should().Be("Logs: 12 files, 1.17 KB");
+        row.LastResult.Should().Be("No operations yet");
         await row.RefreshStateAsync();
         inspector.Calls.Should().Be(1,"automatic state refresh must not scan storage");
     }
 
+    [Theory]
+    [InlineData(1023,"1023 B")]
+    [InlineData(1024,"1 KB")]
+    [InlineData(1048576,"1 MB")]
+    [InlineData(1073741824,"1 GB")]
+    [InlineData(1228,"1.2 KB")]
+    public void Storage_sizes_use_binary_units(long bytes,string expected) =>
+        TerminalRowViewModel.FormatStorageSize(bytes).Should().Be(expected);
+
+    [Fact] public async Task Cleanup_preview_does_not_change_the_originating_row()
+    {
+        var terminal=T(); var inspector=new Inspector(); var row=new TerminalRowViewModel(terminal,new Process(),storage:inspector);
+        var cleanup=new CleanupViewModel(terminal,inspector,CoordinatorFor(terminal),row.ApplyCleanupResult,row.InspectStorageAsync);
+        await cleanup.LoadPreviewAsync();
+        row.StorageSummary.Should().Be("Storage not inspected");
+        row.LastResult.Should().Be("No operations yet");
+    }
+
     [Fact] public async Task Completed_cleanup_refreshes_row_storage_and_last_result()
     {
-        var terminal=T(); var inspector=new Inspector(); var row=new TerminalRowViewModel(terminal,new Process());
-        var cleanup=new CleanupViewModel(terminal,inspector,CoordinatorFor(terminal,false),row.ApplyStorageInspection,row.ApplyCleanupResult);
+        var terminal=T(); var inspector=new Inspector(); var row=new TerminalRowViewModel(terminal,new Process(),storage:inspector);
+        var cleanup=new CleanupViewModel(terminal,inspector,CoordinatorFor(terminal,false),row.ApplyCleanupResult,row.InspectStorageAsync);
         await cleanup.LoadPreviewAsync(); cleanup.Categories[0].IsSelected=true; cleanup.IsDestructiveConfirmed=true;
         await cleanup.PrepareAsync(); await cleanup.ContinueAsync(false);
-        inspector.Calls.Should().Be(2,"storage must be inspected again after cleanup");
+        inspector.Calls.Should().Be(2,"preview and completed cleanup each inspect once");
+        row.StorageSummary.Should().Be("Logs: 12 files, 1.17 KB");
         row.LastResult.Should().Be(cleanup.ResultText).And.Contain("Completed");
     }
 
     [Fact] public async Task Completed_cleanup_result_reaches_row_when_storage_reinspection_fails()
     {
-        var terminal=T(); var row=new TerminalRowViewModel(terminal,new Process());
-        var cleanup=new CleanupViewModel(terminal,new FailingSecondInspector(),CoordinatorFor(terminal,false),row.ApplyStorageInspection,row.ApplyCleanupResult);
+        var terminal=T(); var inspector=new FailingSecondInspector(); var row=new TerminalRowViewModel(terminal,new Process(),storage:inspector);
+        var cleanup=new CleanupViewModel(terminal,inspector,CoordinatorFor(terminal,false),row.ApplyCleanupResult,row.InspectStorageAsync);
         await cleanup.LoadPreviewAsync(); cleanup.Categories[0].IsSelected=true; cleanup.IsDestructiveConfirmed=true;
         await cleanup.PrepareAsync(); await cleanup.ContinueAsync(false);
         row.LastResult.Should().Contain("Completed");
-        cleanup.Error.Should().Be("inspection failed");
+        row.Error.Should().Be("inspection failed");
     }
 
     [Fact] public async Task Overlapping_state_refresh_is_skipped()

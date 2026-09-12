@@ -1,30 +1,31 @@
+using System.Globalization;
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Mt5Manager.Application.Abstractions;
 using Mt5Manager.Domain.Models;
 namespace Mt5Manager.Wpf.ViewModels;
-public sealed partial class MainViewModel(ITerminalDiscovery discovery,ITerminalRegistry registry,ITerminalProcessController process,ITerminalRuntimeInspector? runtime=null,ITerminalAlgoTradingController? algo=null):ObservableObject
+public sealed partial class MainViewModel(ITerminalDiscovery discovery,ITerminalRegistry registry,ITerminalProcessController process,ITerminalRuntimeInspector? runtime=null,ITerminalAlgoTradingController? algo=null,ITerminalStorageInspector? storage=null):ObservableObject
 {
  readonly List<TerminalRowViewModel> all=[];CancellationTokenSource? refresh;int stateRefreshActive;
  [ObservableProperty]string searchText="";[ObservableProperty]bool isRefreshing;[ObservableProperty]string? error;[ObservableProperty]TerminalRowViewModel? selectedTerminal;
  public ObservableCollection<TerminalRowViewModel> Terminals{get;}=[];
  partial void OnSearchTextChanged(string value)=>ApplyFilter();
-    [RelayCommand]public async Task RefreshAsync(){refresh?.Cancel();refresh?.Dispose();refresh=new();IsRefreshing=true;Error=null;var selectedId=SelectedTerminal?.Terminal.Id;try{var found=await discovery.DiscoverAsync(refresh.Token);var existing=all.ToDictionary(x=>x.Terminal.Id);var rows=found.Select(x=>existing.TryGetValue(x.Id,out var row)&&RegistrationsEqual(row.Terminal,x)?row:new TerminalRowViewModel(x,process,runtime,algo)).ToArray();await Task.WhenAll(rows.Select(x=>x.RefreshStateAsync(refresh.Token)));all.Clear();all.AddRange(rows);ApplyFilter(selectedId);}catch(OperationCanceledException){}catch(Exception ex){Error=ex.Message;}finally{IsRefreshing=false;}}
+    [RelayCommand]public async Task RefreshAsync(){refresh?.Cancel();refresh?.Dispose();refresh=new();IsRefreshing=true;Error=null;var selectedId=SelectedTerminal?.Terminal.Id;try{var found=await discovery.DiscoverAsync(refresh.Token);var existing=all.ToDictionary(x=>x.Terminal.Id);var rows=found.Select(x=>existing.TryGetValue(x.Id,out var row)&&RegistrationsEqual(row.Terminal,x)?row:new TerminalRowViewModel(x,process,runtime,algo,storage)).ToArray();await Task.WhenAll(rows.Select(x=>x.RefreshStateAsync(refresh.Token)));all.Clear();all.AddRange(rows);ApplyFilter(selectedId);}catch(OperationCanceledException){}catch(Exception ex){Error=ex.Message;}finally{IsRefreshing=false;}}
  static bool RegistrationsEqual(TerminalRegistration left,TerminalRegistration right)=>left.Id==right.Id&&left.DisplayName==right.DisplayName&&left.ExecutablePath==right.ExecutablePath&&left.DataDirectory==right.DataDirectory&&left.WorkingDirectory==right.WorkingDirectory&&left.Arguments.SequenceEqual(right.Arguments)&&left.Source==right.Source&&left.DataDirectoryVerified==right.DataDirectoryVerified;
  void ApplyFilter(Guid? preferredId=null){var selectedId=preferredId??SelectedTerminal?.Terminal.Id;Terminals.Clear();foreach(var row in all.Where(x=>string.IsNullOrWhiteSpace(SearchText)||x.DisplayName.Contains(SearchText,StringComparison.OrdinalIgnoreCase)||x.ExecutablePath.Contains(SearchText,StringComparison.OrdinalIgnoreCase)))Terminals.Add(row);SelectedTerminal=Terminals.FirstOrDefault(x=>x.Terminal.Id==selectedId)??Terminals.FirstOrDefault();}
  public async Task AddManualAsync(TerminalRegistration terminal){try{var items=(await registry.LoadAsync()).Where(x=>x.Id!=terminal.Id).Append(terminal).ToArray();await registry.SaveAsync(items);}catch(Exception ex){Error=$"The terminal could not be registered: {ex.Message}";return;}await RefreshAsync();}public void CancelRefresh()=>refresh?.Cancel();
  public async Task RefreshStatesAsync(CancellationToken token=default){if(Interlocked.CompareExchange(ref stateRefreshActive,1,0)!=0)return;try{foreach(var row in all.ToArray()){if(token.IsCancellationRequested)return;try{await row.RefreshStateAsync(token);}catch(OperationCanceledException)when(token.IsCancellationRequested){return;}}}finally{Volatile.Write(ref stateRefreshActive,0);}}
 }
-public sealed partial class TerminalRowViewModel(TerminalRegistration terminal,ITerminalProcessController process,ITerminalRuntimeInspector? runtime=null,ITerminalAlgoTradingController? algo=null):ObservableObject
+public sealed partial class TerminalRowViewModel(TerminalRegistration terminal,ITerminalProcessController process,ITerminalRuntimeInspector? runtime=null,ITerminalAlgoTradingController? algo=null,ITerminalStorageInspector? storage=null):ObservableObject
 {
     public TerminalRegistration Terminal=>terminal;public string DisplayName=>terminal.DisplayName;public string ExecutablePath=>terminal.ExecutablePath;public string DataDirectory=>terminal.DataDirectory;
     [ObservableProperty][NotifyCanExecuteChangedFor(nameof(StartCommand),nameof(StopCommand),nameof(RestartCommand),nameof(EnableAlgoCommand),nameof(DisableAlgoCommand))]TerminalState state=TerminalState.Busy;
-    [ObservableProperty][NotifyCanExecuteChangedFor(nameof(StartCommand),nameof(StopCommand),nameof(RestartCommand),nameof(EnableAlgoCommand),nameof(DisableAlgoCommand))][NotifyPropertyChangedFor(nameof(CanCleanup),nameof(CanEnableAlgo),nameof(CanDisableAlgo))]bool isBusy;
+    [ObservableProperty][NotifyCanExecuteChangedFor(nameof(StartCommand),nameof(StopCommand),nameof(RestartCommand),nameof(EnableAlgoCommand),nameof(DisableAlgoCommand),nameof(InspectStorageCommand))][NotifyPropertyChangedFor(nameof(CanCleanup),nameof(CanInspectStorage),nameof(CanEnableAlgo),nameof(CanDisableAlgo))]bool isBusy;
     [ObservableProperty][NotifyCanExecuteChangedFor(nameof(EnableAlgoCommand),nameof(DisableAlgoCommand))]TerminalAccountSnapshot? account;
     [ObservableProperty]string? error;[ObservableProperty]int? processId;[ObservableProperty]string storageSummary="Storage not inspected";[ObservableProperty]string lastResult="No operations yet";
     [ObservableProperty]string accountSummary="Bridge unavailable";[ObservableProperty]string algoSummary="Algo Trading unknown";
-    public bool CanStart=>!IsBusy&&State is TerminalState.Stopped or TerminalState.Error;public bool CanStop=>!IsBusy&&State==TerminalState.Running;public bool CanRestart=>CanStop;public bool CanCleanup=>!IsBusy&&terminal.DataDirectoryVerified;
+    public bool CanStart=>!IsBusy&&State is TerminalState.Stopped or TerminalState.Error;public bool CanStop=>!IsBusy&&State==TerminalState.Running;public bool CanRestart=>CanStop;public bool CanCleanup=>!IsBusy&&terminal.DataDirectoryVerified;public bool CanInspectStorage=>!IsBusy&&terminal.DataDirectoryVerified&&storage is not null;
     public bool CanEnableAlgo=>CanControlAlgo&&Account?.GlobalAlgoTrading is AlgoTradingState.Disabled;
     public bool CanDisableAlgo=>CanControlAlgo&&Account?.GlobalAlgoTrading is AlgoTradingState.Enabled;
     bool CanControlAlgo=>!IsBusy&&State==TerminalState.Running&&runtime is not null&&algo is not null&&terminal.DataDirectoryVerified&&Account is not null&&Account.GlobalAlgoTrading!=AlgoTradingState.Unknown;
@@ -34,11 +35,14 @@ public sealed partial class TerminalRowViewModel(TerminalRegistration terminal,I
     [RelayCommand(CanExecute=nameof(CanEnableAlgo))]public async Task EnableAlgoAsync()=>await SetAlgoAsync(true);
     [RelayCommand(CanExecute=nameof(CanDisableAlgo))]public async Task DisableAlgoAsync()=>await SetAlgoAsync(false);
     [RelayCommand]public Task RefreshStateAsync()=>RefreshStateAsync(CancellationToken.None);
+    [RelayCommand(CanExecute=nameof(CanInspectStorage))]public async Task InspectStorageAsync()=>await RunStorageInspectionAsync();
     public async Task RefreshStateAsync(CancellationToken token)=>await Run(async()=>{var s=await process.GetStateAsync(terminal,token);State=s.State;ProcessId=s.ProcessId;Error=s.Error;if(runtime is not null){Account=await runtime.ReadAsync(terminal,token);ProjectRuntimeState();}},token);
-    public void ApplyStorageInspection(IReadOnlyList<CategoryUsage> usage)=>StorageSummary=string.Join(" · ",usage.Select(x=>$"{x.Category}: {x.FileCount:N0} files, {x.Bytes:N0} bytes"));
+    public async Task RunStorageInspectionAsync(){if(storage is null)return;await Run(async()=>ApplyStorageInspection(await storage.InspectAsync(terminal,CancellationToken.None)),preserveLastResult:true);}
+    public void ApplyStorageInspection(IReadOnlyList<CategoryUsage> usage)=>StorageSummary=string.Join(" · ",usage.Select(x=>$"{x.Category}: {x.FileCount:N0} files, {FormatStorageSize(x.Bytes)}"));
+    public static string FormatStorageSize(long bytes){string[] units=["B","KB","MB","GB"];var value=(decimal)bytes;var unit=0;while(value>=1024&&unit<units.Length-1){value/=1024;unit++;}return unit==0?$"{bytes} B":$"{value.ToString("0.##",CultureInfo.InvariantCulture)} {units[unit]}";}
     public void ApplyCleanupResult(string result)=>LastResult=result;
     async Task SetAlgoAsync(bool enable)=>await Run(async()=>{var result=await algo!.SetAsync(terminal,enable,CancellationToken.None);if(result.Snapshot is not null){Account=result.Snapshot;ProjectRuntimeState();}if(!result.Success)throw new InvalidOperationException(result.Message);LastResult=result.Message;});
     void ProjectRuntimeState(){var a=Account;AccountSummary=a is null?"Bridge unavailable":$"{a.Login} · {a.AccountName} · {a.Server} · {a.TradeMode}";AlgoSummary=a is null?"Algo Trading unknown":$"Global {a.GlobalAlgoTrading} · EA {(a.EaTradingAllowed?"allowed":"denied")} · Account {(a.AccountTradingAllowed?"allowed":"denied")} · Expert {(a.AccountExpertAllowed?"allowed":"denied")} · {(a.Connected?"connected":"disconnected")}";}
     async Task RefreshActualStateAsync(){var current=await process.GetStateAsync(terminal,CancellationToken.None);State=current.State;ProcessId=current.ProcessId;}
-    async Task Run(Func<Task> operation,CancellationToken token=default){if(IsBusy)return;IsBusy=true;Error=null;try{await operation();}catch(OperationCanceledException)when(token.IsCancellationRequested){throw;}catch(Exception ex){Error=ex.Message;LastResult=$"Failed: {ex.Message}";}finally{IsBusy=false;}}
+    async Task Run(Func<Task> operation,CancellationToken token=default,bool preserveLastResult=false){if(IsBusy)return;IsBusy=true;Error=null;try{await operation();}catch(OperationCanceledException)when(token.IsCancellationRequested){throw;}catch(Exception ex){Error=ex.Message;if(!preserveLastResult)LastResult=$"Failed: {ex.Message}";}finally{IsBusy=false;}}
 }
