@@ -74,8 +74,15 @@ public interface ITelegramBotService : IAsyncDisposable
 
 public enum TelegramBotErrorKind { Unauthorized, RateLimited, Transient }
 
-public sealed class TelegramBotException(TelegramBotErrorKind kind, string message, TimeSpan? retryAfter = null) : Exception(message)
+public interface ITelegramBotApiError
+{
+    TelegramBotErrorKind BotErrorKind { get; }
+    TimeSpan? RetryAfter { get; }
+}
+
+public sealed class TelegramBotException(TelegramBotErrorKind kind, string message, TimeSpan? retryAfter = null) : Exception(message), ITelegramBotApiError
 {
     public TelegramBotErrorKind Kind { get; } = kind;
+    public TelegramBotErrorKind BotErrorKind => Kind;
     public TimeSpan? RetryAfter { get; } = retryAfter;
 }

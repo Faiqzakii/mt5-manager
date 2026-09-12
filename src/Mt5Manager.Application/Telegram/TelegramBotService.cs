@@ -194,12 +194,10 @@ public sealed class TelegramBotService : ITelegramBotService
     private string Store(long chat, bool enable, Guid[] ids) { var key = Convert.ToHexString(RandomNumberGenerator.GetBytes(9)).ToLowerInvariant(); confirmations[key] = new(chat, enable, [.. ids], clock.GetUtcNow().AddMinutes(2)); return key; }
     private bool Take(string key, long chat, out Confirmation value) { if (confirmations.Remove(key, out value!) && value.ChatId == chat && value.ExpiresAt > clock.GetUtcNow()) return true; value = null!; return false; }
     private void SetState(TelegramBotState value) { if (State == value) return; State = value; StateChanged?.Invoke(this, EventArgs.Empty); }
-    private static (TelegramBotErrorKind Kind, TimeSpan? RetryAfter) Classify(Exception error)
-    {
-        if (error is TelegramBotException known) return (known.Kind, known.RetryAfter);
-        var kind = error.GetType().GetProperty("Kind")?.GetValue(error)?.ToString(); var retry = error.GetType().GetProperty("RetryAfter")?.GetValue(error) as TimeSpan?;
-        return kind switch { "Unauthorized" => (TelegramBotErrorKind.Unauthorized, null), "RateLimited" => (TelegramBotErrorKind.RateLimited, retry), _ => (TelegramBotErrorKind.Transient, null) };
-    }
+    private static (TelegramBotErrorKind Kind, TimeSpan? RetryAfter) Classify(Exception error) =>
+        error is ITelegramBotApiError known
+            ? (known.BotErrorKind, known.RetryAfter)
+            : (TelegramBotErrorKind.Transient, null);
     private sealed record Confirmation(long ChatId, bool Enable, Guid[] TerminalIds, DateTimeOffset ExpiresAt);
 }
 

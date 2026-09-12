@@ -16,7 +16,7 @@ public enum TelegramApiErrorKind
     Network
 }
 
-public sealed class TelegramApiException : Exception
+public sealed class TelegramApiException : Exception, ITelegramBotApiError
 {
     public TelegramApiException(
         TelegramApiErrorKind kind,
@@ -32,6 +32,12 @@ public sealed class TelegramApiException : Exception
     }
 
     public TelegramApiErrorKind Kind { get; }
+    public TelegramBotErrorKind BotErrorKind => Kind switch
+    {
+        TelegramApiErrorKind.Unauthorized => TelegramBotErrorKind.Unauthorized,
+        TelegramApiErrorKind.RateLimited => TelegramBotErrorKind.RateLimited,
+        _ => TelegramBotErrorKind.Transient
+    };
     public HttpStatusCode? StatusCode { get; }
     public TimeSpan? RetryAfter { get; }
     public string Description { get; }
