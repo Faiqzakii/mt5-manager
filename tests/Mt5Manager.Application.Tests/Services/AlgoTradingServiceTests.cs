@@ -100,6 +100,20 @@ public sealed class AlgoTradingServiceTests
     }
 
     [Fact]
+    public async Task Audit_append_failure_after_controller_result_is_not_retried_as_rejection()
+    {
+        var id = Guid.NewGuid();
+        var audit = new Audit { Exception = new IOException("audit unavailable") };
+        var service = Service(new Registry(Registration(id, "Broker")),
+            new Controller(new(true, "done", null)), audit);
+
+        var act = () => service.SetAsync(new(id, true, AlgoOperationSource.Wpf));
+
+        await act.Should().ThrowAsync<IOException>().WithMessage("audit unavailable");
+        audit.Attempts.Should().Be(1);
+    }
+
+    [Fact]
     public async Task Cancellation_propagates_to_controller_without_rejection_audit()
     {
         var id = Guid.NewGuid();
@@ -168,6 +182,14 @@ public sealed class AlgoTradingServiceTests
     private sealed class Audit : IAuditLogger
     {
         public List<AuditRecord> Records { get; } = [];
-        public Task AppendAsync(AuditRecord record, CancellationToken cancellationToken = default) { Records.Add(record); return Task.CompletedTask; }
+        public Exception? Exception { get; init; }
+        public int Attempts { get; private set; }
+        public Task AppendAsync(AuditRecord record, CancellationToken cancellationToken = default)
+        {
+            Attempts++;
+            if (Exception is not null) throw Exception;
+            Records.Add(record);
+            return Task.CompletedTask;
+        }
     }
 }

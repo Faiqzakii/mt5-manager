@@ -42,11 +42,10 @@ public sealed class AlgoTradingService : IAlgoTradingService
                 return new(request.TerminalId, UnknownTerminalName, request.Enable, result);
             }
 
+            AlgoTradingControlResult controlResult;
             try
             {
-                var result = await controller.SetAsync(terminal, request.Enable, cancellationToken);
-                await AppendAuditAsync(request, terminal.DisplayName, result, cancellationToken);
-                return new(request.TerminalId, terminal.DisplayName, request.Enable, result);
+                controlResult = await controller.SetAsync(terminal, request.Enable, cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -58,6 +57,9 @@ public sealed class AlgoTradingService : IAlgoTradingService
                     new AlgoTradingControlResult(false, exception.Message, null), cancellationToken);
                 throw;
             }
+
+            await AppendAuditAsync(request, terminal.DisplayName, controlResult, cancellationToken);
+            return new(request.TerminalId, terminal.DisplayName, request.Enable, controlResult);
         }
         finally
         {
