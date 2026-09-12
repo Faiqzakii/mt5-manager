@@ -35,6 +35,76 @@ public sealed class JsonTelegramSettingsStoreTests : IDisposable
         (await store.LoadAsync()).Should().BeNull();
     }
 
+    [Fact]
+    public void Default_store_uses_per_user_local_app_data_and_not_machine_wide_program_data()
+    {
+        var expected = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Mt5Manager", "telegram.json");
+        expected.Should().NotStartWith(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData));
+
+        var store = new JsonTelegramSettingsStore();
+
+        store.DefaultPath.Should().Be(expected);
+    }
+
+    [Fact]
+    public async Task Remove_sweeps_token_file_backups_and_temporary_leftovers()
+    {
+        var settingsPath = Path.Combine(_root, "telegram.json");
+        var corruptBackup = $"{settingsPath}.corrupt-20260912120000000";
+        var tempLeftover = Path.Combine(_root, $".{Path.GetFileName(settingsPath)}.{Guid.NewGuid():N}.tmp");
+        await File.WriteAllTextAsync(settingsPath, "{}");
+        await File.WriteAllTextAsync(corruptBackup, "{not-json");
+        await File.WriteAllTextAsync(tempLeftover, "{not-json");
+        await File.WriteAllTextAsync(Path.Combine(_root, "unrelated.txt"), "keep");
+
+        await new JsonTelegramSettingsStore(settingsPath).RemoveAsync();
+
+        Directory.EnumerateFiles(_root).Should().BeEquivalentTo([Path.Combine(_root, "unrelated.txt")]);
+    }
+
+    [Fact]
+    public async Task Crash_leftover_temp_file_does_not_corrupt_settings_and_next_save_overwrites_atomically()
+    {
+        var store = new JsonTelegramSettingsStore(SettingsPath);
+        await store.SaveAsync(Settings("protected-current", 1, 0, true));
+        await File.WriteAllTextAsync(Path.Combine(_root, ".telegram.json.deadbeef.tmp"), "{partial-crash");
+
+        (await store.LoadAsync()).Should().Be(Settings("protected-current", 1, 0, true));
+        await store.SaveAsync(Settings("protected-next", 2, 0, true));
+
+        Directory.EnumerateFiles(_root).Should().BeEquivalentTo([SettingsPath]);
+        (await store.LoadAsync()).Should().Be(Settings("protected-next", 2, 0, true));
+    }
+
+    [Fact]
+    public async Task Load_returns_null_when_file_is_removed_before_stream_open()
+    {
+        var store = new JsonTelegramSettingsStore(SettingsPath);
+        await File.WriteAllTextAsync(SettingsPath, "{}");
+        File.Delete(SettingsPath);
+
+        (await store.LoadAsync()).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Atomic_save_observes_temporary_token_file_then_leaves_only_final_settings()
+    {
+        var store = new JsonTelegramSettingsStore(SettingsPath);
+        var observed = false;
+        var observer = Task.Run(() =>
+        {
+            for (var i = 0; i < 100_000 && !observed; i++)
+                observed |= Directory.EnumerateFiles(_root, ".telegram.json.*.tmp").Any();
+        });
+
+        await store.SaveAsync(Settings("protected", 1, 0, true));
+        await observer;
+
+        observed.Should().BeTrue();
+        Directory.EnumerateFiles(_root).Should().ContainSingle().Which.Should().Be(SettingsPath);
+    }
+
     [Theory]
     [InlineData("", 1, 0, true)]
     [InlineData("protected", 0, 0, true)]

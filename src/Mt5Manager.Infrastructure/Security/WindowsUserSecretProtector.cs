@@ -7,7 +7,8 @@ namespace Mt5Manager.Infrastructure.Security;
 [System.Runtime.Versioning.SupportedOSPlatform("windows")]
 public sealed class WindowsUserSecretProtector : ISecretProtector
 {
-    private static readonly byte[] Entropy = "Mt5Manager.Telegram.Token.v1"u8.ToArray();
+    internal static byte[] Entropy => (byte[])_entropy.Clone();
+    private static readonly byte[] _entropy = "Mt5Manager.Telegram.Token.v1"u8.ToArray();
 
     public ProtectedTelegramToken Protect(string plaintext)
     {
@@ -26,10 +27,17 @@ public sealed class WindowsUserSecretProtector : ISecretProtector
 
     public string Unprotect(ProtectedTelegramToken protectedValue)
     {
-        ArgumentNullException.ThrowIfNull(protectedValue);
         byte[] payload;
-        try { payload = Convert.FromBase64String(protectedValue.Value); }
-        catch (FormatException exception) { throw new CryptographicException("The protected token payload is invalid.", exception); }
+        try
+        {
+            payload = Convert.FromBase64String(protectedValue?.Value!);
+        }
+        catch (Exception exception) when (exception is ArgumentNullException or FormatException)
+        {
+            throw new CryptographicException("The protected token payload is invalid.",
+                exception as FormatException ?? new FormatException("The protected token payload is missing.", exception));
+        }
+
         var plaintext = ProtectedData.Unprotect(payload, Entropy, DataProtectionScope.CurrentUser);
         try { return Encoding.UTF8.GetString(plaintext); }
         finally { CryptographicOperations.ZeroMemory(plaintext); }
