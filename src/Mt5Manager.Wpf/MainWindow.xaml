@@ -138,7 +138,7 @@
                             <ContentControl.ContentTemplate>
                                 <DataTemplate>
                                     <Grid>
-                                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
 
                                         <Grid>
                                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -172,12 +172,9 @@
                                                     <TextBlock Text="Install Mt5ManagerBridge.mq5 in this terminal to expose account and Algo Trading state." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" Margin="0,6,0,0"/>
                                                 </StackPanel>
                                             </Border>
-                                            <StackPanel Grid.Column="1" VerticalAlignment="Center" MinWidth="220">
-                                                <TextBlock Text="GLOBAL ALGO TRADING" Style="{StaticResource CaptionStyle}" FontWeight="Bold"/>
-                                                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                                    <Button Content="Enable Algo" Command="{Binding EnableAlgoCommand}" Style="{StaticResource PrimaryButtonStyle}" MinWidth="102"/>
-                                                    <Button Content="Disable Algo" Command="{Binding DisableAlgoCommand}" Style="{StaticResource DangerOutlineButtonStyle}" MinWidth="102" Margin="10,0,0,0"/>
-                                                </StackPanel>
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Width="112">
+                                                <Button Content="Enable Algo" Command="{Binding EnableAlgoCommand}" Style="{StaticResource PrimaryButtonStyle}"/>
+                                                <Button Content="Disable Algo" Command="{Binding DisableAlgoCommand}" Style="{StaticResource DangerOutlineButtonStyle}" Margin="0,8,0,0"/>
                                             </StackPanel>
                                         </Grid>
 
@@ -195,19 +192,38 @@
                                             </Border>
                                         </Grid>
 
-                                        <Grid Grid.Row="3" Margin="0,14,0,0">
-                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                            <StackPanel>
-                                                <TextBlock Text="STORAGE AND LAST OPERATION" Style="{StaticResource CaptionStyle}" FontWeight="Bold"/>
-                                                <TextBlock Text="{Binding StorageSummary}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,6,0,0"/>
-                                                <TextBlock Text="{Binding LastResult}" Foreground="{StaticResource TextMutedBrush}" FontSize="12" Margin="0,5,0,0" TextWrapping="Wrap"/>
-                                            </StackPanel>
-                                            <Button Grid.Column="1" Content="Inspect storage" Command="{Binding InspectStorageCommand}" Style="{StaticResource PrimaryButtonStyle}" MinWidth="126" Margin="18,0,0,0" VerticalAlignment="Center"/>
-                                            <Button Grid.Column="2" Content="Cleanup data…" IsEnabled="{Binding CanCleanup}" Click="Cleanup_Click"
-                                                    Style="{StaticResource DangerOutlineButtonStyle}" MinWidth="126" Margin="10,0,0,0" VerticalAlignment="Center"/>
-                                        </Grid>
+                                        <Border Grid.Row="3" Style="{StaticResource SubtlePanelStyle}" Margin="0,14,0,0">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                                <StackPanel VerticalAlignment="Center">
+                                                    <TextBlock Text="STORAGE" Style="{StaticResource CaptionStyle}" FontWeight="Bold"/>
+                                                    <TextBlock Text="{Binding StorageSummary}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="16,0,0,0" VerticalAlignment="Center">
+                                                    <Button Content="Inspect storage" Command="{Binding InspectStorageCommand}" Style="{StaticResource PrimaryButtonStyle}" MinWidth="108"/>
+                                                    <Button Content="Cleanup data…" IsEnabled="{Binding CanCleanup}" Click="Cleanup_Click" Style="{StaticResource DangerOutlineButtonStyle}" MinWidth="108" Margin="8,0,0,0"/>
+                                                </StackPanel>
+                                            </Grid>
+                                        </Border>
 
-                                        <Border Grid.Row="4" Margin="0,14,0,0">
+                                        <Border Grid.Row="4" Style="{StaticResource SubtlePanelStyle}" Margin="0,14,0,0">
+                                            <StackPanel>
+                                                <TextBlock Text="OPERATION LOG" Style="{StaticResource CaptionStyle}" FontWeight="Bold"/>
+                                                <Grid Margin="0,8,0,0">
+                                                    <TextBlock Text="No operations recorded yet." Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center">
+                                                        <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding OperationHistory.Count}" Value="0"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
+                                                    </TextBlock>
+                                                    <ListBox ItemsSource="{Binding OperationHistory}" MaxHeight="150" BorderThickness="0" Background="Transparent"
+                                                             ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                                             ScrollViewer.CanContentScroll="False" ScrollViewer.PanningMode="VerticalOnly">
+                                                        <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,0,0,6"/><Setter Property="Focusable" Value="False"/></Style></ListBox.ItemContainerStyle>
+                                                        <ListBox.ItemTemplate><DataTemplate><Grid Height="24"><Grid.ColumnDefinitions><ColumnDefinition Width="142"/><ColumnDefinition Width="110"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Timestamp,StringFormat={}{0:yyyy-MM-dd HH:mm:ss}}" FontFamily="Consolas" FontSize="12" Foreground="{StaticResource TextMutedBrush}"/><TextBlock Grid.Column="1" Text="{Binding Operation}" FontWeight="SemiBold" FontSize="12"/><TextBlock Grid.Column="2" Text="{Binding Message}" FontSize="12" TextTrimming="CharacterEllipsis" ToolTip="{Binding Message}"/></Grid></DataTemplate></ListBox.ItemTemplate>
+                                                    </ListBox>
+                                                </Grid>
+                                            </StackPanel>
+                                        </Border>
+
+                                        <Border Grid.Row="5" Margin="0,14,0,0">
                                             <Border.Style><Style TargetType="Border" BasedOn="{StaticResource ErrorPanelStyle}">
                                                 <Style.Triggers><DataTrigger Binding="{Binding Error}" Value="{x:Null}"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers>
                                             </Style></Border.Style>

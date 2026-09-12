@@ -79,6 +79,28 @@ public sealed class JsonLinesAuditLoggerTests : IDisposable
     }
 
     [Fact]
+    public async Task Reads_newest_records_for_one_terminal_and_retains_one_hundred()
+    {
+        var logger = new JsonLinesAuditLogger(AuditPath);
+        var terminal = Guid.NewGuid();
+        var other = Guid.NewGuid();
+        for (var index = 0; index < 105; index++)
+            await logger.AppendAsync(Record(terminal, AuditOutcome.Completed) with
+            {
+                Timestamp = DateTimeOffset.UnixEpoch.AddMinutes(index),
+                Message = $"result {index}"
+            });
+        await logger.AppendAsync(Record(other, AuditOutcome.Rejected));
+
+        var records = await logger.ReadAsync(terminal, 100);
+
+        records.Should().HaveCount(100);
+        records.Select(x => x.Message).Should().StartWith("result 104", "result 103");
+        records.Should().NotContain(x => x.TerminalId == other);
+        (await File.ReadAllLinesAsync(AuditPath)).Should().HaveCount(101);
+    }
+
+    [Fact]
     public async Task Dispose_does_not_break_already_started_appends()
     {
         var logger = new JsonLinesAuditLogger(AuditPath);

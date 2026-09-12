@@ -29,4 +29,6 @@ public sealed record AuditRecord(
 public interface IAuditLogger
 {
     Task AppendAsync(AuditRecord record, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<AuditRecord>> ReadAsync(Guid terminalId, int limit = 100,
+        CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<AuditRecord>>([]);
 }

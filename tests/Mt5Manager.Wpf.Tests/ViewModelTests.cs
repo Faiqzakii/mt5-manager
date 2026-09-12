@@ -47,7 +47,7 @@ public sealed class ViewModelTests
     [Fact] public async Task Cleanup_preview_does_not_change_the_originating_row()
     {
         var terminal=T(); var inspector=new Inspector(); var row=new TerminalRowViewModel(terminal,new Process(),storage:inspector);
-        var cleanup=new CleanupViewModel(terminal,inspector,CoordinatorFor(terminal),row.ApplyCleanupResult,row.InspectStorageAsync);
+        var cleanup=new CleanupViewModel(terminal,inspector,CoordinatorFor(terminal),result=>{row.LastResult=result;return Task.CompletedTask;},row.InspectStorageAsync);
         await cleanup.LoadPreviewAsync();
         row.StorageSummary.Should().Be("Storage not inspected");
         row.LastResult.Should().Be("No operations yet");
@@ -56,7 +56,7 @@ public sealed class ViewModelTests
     [Fact] public async Task Completed_cleanup_refreshes_row_storage_and_last_result()
     {
         var terminal=T(); var inspector=new Inspector(); var row=new TerminalRowViewModel(terminal,new Process(),storage:inspector);
-        var cleanup=new CleanupViewModel(terminal,inspector,CoordinatorFor(terminal,false),row.ApplyCleanupResult,row.InspectStorageAsync);
+        var cleanup=new CleanupViewModel(terminal,inspector,CoordinatorFor(terminal,false),result=>{row.LastResult=result;return Task.CompletedTask;},row.InspectStorageAsync);
         await cleanup.LoadPreviewAsync(); cleanup.Categories[0].IsSelected=true; cleanup.IsDestructiveConfirmed=true;
         await cleanup.PrepareAsync(); await cleanup.ContinueAsync(false);
         inspector.Calls.Should().Be(2,"preview and completed cleanup each inspect once");
@@ -67,7 +67,7 @@ public sealed class ViewModelTests
     [Fact] public async Task Completed_cleanup_result_reaches_row_when_storage_reinspection_fails()
     {
         var terminal=T(); var inspector=new FailingSecondInspector(); var row=new TerminalRowViewModel(terminal,new Process(),storage:inspector);
-        var cleanup=new CleanupViewModel(terminal,inspector,CoordinatorFor(terminal,false),row.ApplyCleanupResult,row.InspectStorageAsync);
+        var cleanup=new CleanupViewModel(terminal,inspector,CoordinatorFor(terminal,false),result=>{row.LastResult=result;return Task.CompletedTask;},row.InspectStorageAsync);
         await cleanup.LoadPreviewAsync(); cleanup.Categories[0].IsSelected=true; cleanup.IsDestructiveConfirmed=true;
         await cleanup.PrepareAsync(); await cleanup.ContinueAsync(false);
         row.LastResult.Should().Contain("Completed");
@@ -172,6 +172,33 @@ public sealed class ViewModelTests
         await row.EnableAlgoAsync();
         algo.Calls.Should().Be(1); algo.LastEnable.Should().BeTrue(); row.LastResult.Should().Be("Algo Trading was enabled."); row.AlgoSummary.Should().Contain("Global Enabled");
     }
+
+    [Fact] public async Task Row_loads_newest_operation_history_and_records_commands()
+    {
+        var terminal=T(); var process=new Process{State=new(TerminalState.Stopped,null,null)}; var audit=new Audit();
+        for(var index=0;index<8;index++) audit.Records.Add(OperationRecord(terminal,$"Older {index}",$"result {index}",index));
+        var row=new TerminalRowViewModel(terminal,process,audit:audit);
+
+        await row.LoadOperationHistoryAsync();
+        row.OperationHistory.Should().HaveCount(8);
+        row.OperationHistory[0].Operation.Should().Be("Older 7");
+
+        await row.StartAsync();
+        audit.Records.Should().Contain(x=>x.Operation=="Start"&&x.Outcome==AuditOutcome.Completed);
+        row.OperationHistory[0].Operation.Should().Be("Start");
+    }
+
+    [Fact] public async Task Failed_row_operation_is_persisted_without_replacing_the_operation_error()
+    {
+        var terminal=T(); var process=new Process{State=new(TerminalState.Stopped,null,null),ThrowStart=true}; var audit=new Audit();
+        var row=new TerminalRowViewModel(terminal,process,audit:audit);
+        await row.StartAsync();
+        audit.Records.Should().ContainSingle(x=>x.Operation=="Start"&&x.Outcome==AuditOutcome.Rejected);
+        row.Error.Should().Be("boom");
+    }
+
+    static AuditRecord OperationRecord(TerminalRegistration terminal,string operation,string message,int minute=0)=>
+        new(DateTimeOffset.UnixEpoch.AddMinutes(minute),terminal.Id,terminal.DisplayName,operation,[],false,ShutdownMethod.None,AuditOutcome.Completed,message,[],false,null);
 
     [Fact] public async Task Algo_command_surfaces_controller_failure()
     {
@@ -296,7 +323,7 @@ public sealed class ViewModelTests
     sealed class BlockingProcess:ITerminalProcessController { public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously); public int Calls; public void Reset(){Started=new(TaskCreationOptions.RunContinuationsAsynchronously);Release=new(TaskCreationOptions.RunContinuationsAsynchronously);Calls=0;} public async Task<TerminalRuntimeState> GetStateAsync(TerminalRegistration t,CancellationToken c){Calls++;Started.TrySetResult();await Release.Task;return new(TerminalState.Running,1,null);} public Task<int> StartAsync(TerminalRegistration t,CancellationToken c)=>Task.FromResult(1); public Task<StopResult> StopAsync(TerminalRegistration t,TimeSpan timeout,bool force,CancellationToken c)=>Task.FromResult(new StopResult(StopOutcome.AlreadyStopped,null)); }
     sealed class Cleaner:ITerminalCleanupService { public Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(TerminalRegistration t,IReadOnlySet<CleanupCategory> c,CancellationToken x)=>Task.FromResult<IReadOnlyList<CleanupCategoryResult>>([new(CleanupCategory.Logs,11,1100,[new("locked","denied")])]); }
     sealed class BlockingCleaner:ITerminalCleanupService { public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously); public int Calls; public async Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(TerminalRegistration t,IReadOnlySet<CleanupCategory> c,CancellationToken x){Calls++;Started.SetResult();await Release.Task;return [];} }
-    sealed class Audit:IAuditLogger { public Task AppendAsync(AuditRecord r,CancellationToken c=default)=>Task.CompletedTask; }
+    sealed class Audit:IAuditLogger { public List<AuditRecord> Records=[]; public Task AppendAsync(AuditRecord r,CancellationToken c=default){Records.Add(r);return Task.CompletedTask;} public Task<IReadOnlyList<AuditRecord>> ReadAsync(Guid terminalId,int limit=100,CancellationToken c=default)=>Task.FromResult<IReadOnlyList<AuditRecord>>([..Records.Where(x=>x.TerminalId==terminalId).OrderByDescending(x=>x.Timestamp).Take(limit)]); }
     sealed class Runtime:ITerminalRuntimeInspector{public TerminalAccountSnapshot? Snapshot;public Task<TerminalAccountSnapshot?> ReadAsync(TerminalRegistration t,CancellationToken c=default)=>Task.FromResult(Snapshot);}
     sealed class Algo:ITerminalAlgoTradingController{public int Calls;public bool? LastEnable;public AlgoTradingControlResult Result=new(true,"ok",null);public Task<AlgoTradingControlResult> SetAsync(TerminalRegistration t,bool enable,CancellationToken c=default){Calls++;LastEnable=enable;Result=Result with{Snapshot=Result.Snapshot??null};return Task.FromResult(Result);}}
     static TerminalOperationCoordinator CoordinatorFor(TerminalRegistration t,bool timeout=true,ITerminalCleanupService? cleaner=null){var r=new Registry{Items=[t]};return new(r,new Process{Timeout=timeout},cleaner??new Cleaner(),new Audit());}

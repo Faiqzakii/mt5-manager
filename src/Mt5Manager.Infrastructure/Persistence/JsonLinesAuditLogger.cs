@@ -6,8 +6,8 @@ using Mt5Manager.Application.Abstractions;
 namespace Mt5Manager.Infrastructure.Persistence;
 
 /// <summary>
-/// Appends one JSON object per line to the local audit file. Writes are serialized so that
-/// concurrent operations cannot interleave a record, and existing lines are never rewritten.
+/// Stores JSON-lines audit records behind a serialized gate. Each terminal retains its newest
+/// one hundred records so the same file can back the persistent operation-history view.
 /// </summary>
 public sealed class JsonLinesAuditLogger : IAuditLogger, IDisposable
 {
@@ -28,23 +28,50 @@ public sealed class JsonLinesAuditLogger : IAuditLogger, IDisposable
     {
         ArgumentNullException.ThrowIfNull(record);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-        var line = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(record, Options) + "\n");
-
         await _gate.WaitAsync(cancellationToken);
         try
         {
+            var records = await ReadFileAsync(cancellationToken);
+            records.Add(record);
+            var retained = records.GroupBy(item => item.TerminalId)
+                .SelectMany(group => group.OrderByDescending(item => item.Timestamp).Take(100))
+                .OrderBy(item => item.Timestamp).ToArray();
             var directory = Path.GetDirectoryName(Path.GetFullPath(_path))!;
             Directory.CreateDirectory(directory);
-            await using var stream = new FileStream(_path, FileMode.Append, FileAccess.Write, FileShare.Read,
-                4096, FileOptions.Asynchronous);
-            await stream.WriteAsync(line, cancellationToken);
-            await stream.FlushAsync(cancellationToken);
-            stream.Flush(flushToDisk: true);
+            var content = string.Join('\n', retained.Select(item => JsonSerializer.Serialize(item, Options))) + "\n";
+            await File.WriteAllTextAsync(_path, content, new UTF8Encoding(false), cancellationToken);
         }
         finally
         {
             _gate.Release();
         }
+    }
+
+    public async Task<IReadOnlyList<AuditRecord>> ReadAsync(Guid terminalId, int limit = 100,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            return [.. (await ReadFileAsync(cancellationToken)).Where(item => item.TerminalId == terminalId)
+                .OrderByDescending(item => item.Timestamp).Take(limit)];
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task<List<AuditRecord>> ReadFileAsync(CancellationToken cancellationToken)
+    {
+        if (!File.Exists(_path)) return [];
+        var records = new List<AuditRecord>();
+        foreach (var line in await File.ReadAllLinesAsync(_path, cancellationToken))
+            if (!string.IsNullOrWhiteSpace(line) && JsonSerializer.Deserialize<AuditRecord>(line, Options) is { } record)
+                records.Add(record);
+        return records;
     }
 
     public void Dispose() => Interlocked.Exchange(ref _disposed, 1);
