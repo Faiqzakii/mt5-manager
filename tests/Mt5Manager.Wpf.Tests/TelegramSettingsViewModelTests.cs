@@ -159,6 +159,44 @@ public sealed class TelegramSettingsViewModelTests
     }
 
     [Fact]
+    public async Task Cancelled_load_cannot_repopulate_cleared_secret_after_close_boundary()
+    {
+        var fixture = new Fixture(new TelegramSettings(new ProtectedTelegramToken("ciphertext"), 42, 0, true));
+        fixture.Store.LoadBlock = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var lifetime = new CancellationTokenSource();
+
+        var loading = fixture.ViewModel.LoadAsync(lifetime.Token);
+        await fixture.Store.LoadStarted.Task;
+        lifetime.Cancel();
+        fixture.ViewModel.ClearSecret();
+        fixture.Store.LoadBlock.SetResult();
+        await loading;
+
+        fixture.ViewModel.BotToken.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Cancellation_between_connection_check_and_send_prevents_message()
+    {
+        var fixture = new Fixture();
+        fixture.ViewModel.Enabled = true;
+        fixture.ViewModel.BotToken = Token;
+        fixture.ViewModel.AllowedChatId = "42";
+        fixture.Api.AfterConnection = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var lifetime = new CancellationTokenSource();
+
+        var testing = fixture.ViewModel.TestConnectionAsync(lifetime.Token);
+        await fixture.Api.ConnectionReturned.Task;
+        lifetime.Cancel();
+        fixture.ViewModel.ClearSecret();
+        fixture.Api.AfterConnection.SetResult();
+        await testing;
+
+        fixture.Api.Events.Should().Equal("getMe");
+        fixture.ViewModel.BotToken.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task Cancellation_does_not_surface_an_error_and_busy_disables_mutation()
     {
         var fixture = new Fixture();
@@ -202,7 +240,9 @@ public sealed class TelegramSettingsViewModelTests
         public List<string> Events { get; } = [];
         public TelegramSettings? Saved { get; private set; }
         public Exception? RemoveException { get; set; }
-        public Task<TelegramSettings?> LoadAsync(CancellationToken cancellationToken = default) => Task.FromResult(loaded);
+        public TaskCompletionSource LoadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource? LoadBlock { get; set; }
+        public async Task<TelegramSettings?> LoadAsync(CancellationToken cancellationToken = default) { LoadStarted.TrySetResult(); if (LoadBlock is not null) await LoadBlock.Task; return loaded; }
         public Task SaveAsync(TelegramSettings settings, CancellationToken cancellationToken = default) { Events.Add("save"); timeline.Add("save"); Saved = settings; return Task.CompletedTask; }
         public Task RemoveAsync(CancellationToken cancellationToken = default) { Events.Add("remove"); timeline.Add("remove"); return RemoveException is null ? Task.CompletedTask : Task.FromException(RemoveException); }
     }
@@ -219,11 +259,15 @@ public sealed class TelegramSettingsViewModelTests
         public Exception? Exception { get; set; }
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource? Block { get; set; }
+        public TaskCompletionSource ConnectionReturned { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource? AfterConnection { get; set; }
         public async Task<TelegramConnectionState> GetConnectionStateAsync(string botToken, CancellationToken cancellationToken = default)
         {
             botToken.Should().Be(Token); Events.Add("getMe"); Started.TrySetResult();
             if (Block is not null) await Block.Task.WaitAsync(cancellationToken);
             if (Exception is not null) throw Exception;
+            ConnectionReturned.TrySetResult();
+            if (AfterConnection is not null) await AfterConnection.Task;
             return new(true, "test_bot", 0, null);
         }
         public Task SendMessageAsync(string botToken, long chatId, TelegramMessage message, CancellationToken cancellationToken = default) { Events.Add($"send:{chatId}"); return Task.CompletedTask; }

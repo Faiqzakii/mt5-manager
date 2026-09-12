@@ -8,6 +8,7 @@ public partial class TelegramSettingsDialog : Window
 {
     readonly TelegramSettingsViewModel viewModel;
     bool synchronizingToken;
+    readonly CancellationTokenSource lifetime = new();
 
     public TelegramSettingsDialog(TelegramSettingsViewModel viewModel)
     {
@@ -15,7 +16,7 @@ public partial class TelegramSettingsDialog : Window
         this.viewModel = viewModel;
         DataContext = viewModel;
         viewModel.PropertyChanged += ViewModel_PropertyChanged;
-        Loaded += async (_, _) => await viewModel.LoadAsync();
+        Loaded += async (_, _) => await viewModel.LoadAsync(lifetime.Token);
     }
 
     void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -32,11 +33,11 @@ public partial class TelegramSettingsDialog : Window
         viewModel.BotToken = TokenBox.Password;
     }
 
-    async void Test_Click(object sender, RoutedEventArgs e) => await viewModel.TestConnectionAsync();
+    async void Test_Click(object sender, RoutedEventArgs e) => await viewModel.TestConnectionAsync(lifetime.Token);
 
     async void Save_Click(object sender, RoutedEventArgs e)
     {
-        if (await viewModel.SaveAsync()) DialogResult = true;
+        if (await viewModel.SaveAsync(lifetime.Token)) DialogResult = true;
     }
 
     async void Remove_Click(object sender, RoutedEventArgs e)
@@ -46,13 +47,15 @@ public partial class TelegramSettingsDialog : Window
             "Remove Telegram configuration", MessageBoxButton.YesNo, MessageBoxImage.Warning,
             MessageBoxResult.No) == MessageBoxResult.Yes;
         if (!confirmed) return;
-        if (await viewModel.RemoveConfirmedAsync()) TokenBox.Clear();
+        if (await viewModel.RemoveConfirmedAsync(lifetime.Token)) TokenBox.Clear();
     }
 
     void Window_Closing(object? sender, CancelEventArgs e)
     {
+        lifetime.Cancel();
         viewModel.PropertyChanged -= ViewModel_PropertyChanged;
         TokenBox.Clear();
         viewModel.ClearSecret();
+        lifetime.Dispose();
     }
 }

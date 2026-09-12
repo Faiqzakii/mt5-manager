@@ -38,6 +38,7 @@ public sealed partial class TelegramSettingsViewModel(
             IsBusy = true;
             ValidationMessage = null;
             var settings = await store.LoadAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             if (settings is null)
             {
                 ClearEditor();
@@ -67,19 +68,21 @@ public sealed partial class TelegramSettingsViewModel(
     public async Task TestConnectionAsync(CancellationToken cancellationToken = default)
     {
         if (IsBusy || !TryValidate(requireToken: true, out var chatId)) return;
+        var token = BotToken;
         try
         {
             IsBusy = true;
             ValidationMessage = null;
             Status = "Testing Telegram connection…";
-            var connection = await api.GetConnectionStateAsync(BotToken, cancellationToken);
+            var connection = await api.GetConnectionStateAsync(token, cancellationToken);
             if (!connection.IsConnected)
             {
                 Status = "Connection failed. Verify the bot token and try again.";
                 return;
             }
 
-            await api.SendMessageAsync(BotToken, chatId,
+            cancellationToken.ThrowIfCancellationRequested();
+            await api.SendMessageAsync(token, chatId,
                 new TelegramMessage("MT5 Manager connection test succeeded.", new TelegramKeyboard([])), cancellationToken);
             Status = connection.BotUsername is { Length: > 0 }
                 ? $"connected as @{connection.BotUsername}; test message sent."
