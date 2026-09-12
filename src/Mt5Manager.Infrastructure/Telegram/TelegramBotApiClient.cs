@@ -136,18 +136,25 @@ public sealed class TelegramBotApiClient(HttpClient httpClient) : ITelegramBotAp
             {
                 envelope = JsonSerializer.Deserialize<Envelope<T>>(content, JsonOptions);
             }
+            catch (JsonException) when (!response.IsSuccessStatusCode)
+            {
+                throw FromHttpStatus<T>(response.StatusCode, null, token);
+            }
             catch (JsonException)
             {
                 throw Failure(TelegramApiErrorKind.MalformedResponse, response.StatusCode, null,
                     "Telegram returned a malformed response.");
             }
 
+            if (!response.IsSuccessStatusCode)
+                throw FromHttpStatus(response.StatusCode, envelope, token);
+
             if (envelope is null)
                 throw Failure(TelegramApiErrorKind.MalformedResponse, response.StatusCode, null,
                     "Telegram returned a malformed response.");
 
-            if (!response.IsSuccessStatusCode || !envelope.Ok)
-                throw FromResponse(response.StatusCode, envelope, token);
+            if (!envelope.Ok)
+                throw FromHttpStatus(response.StatusCode, envelope, token);
 
             if (envelope.Result is null)
                 throw Failure(TelegramApiErrorKind.MalformedResponse, response.StatusCode, null,
@@ -169,7 +176,7 @@ public sealed class TelegramBotApiClient(HttpClient httpClient) : ITelegramBotAp
         }
     }
 
-    private static TelegramApiException FromResponse<T>(HttpStatusCode statusCode, Envelope<T> envelope, string token)
+    private static TelegramApiException FromHttpStatus<T>(HttpStatusCode statusCode, Envelope<T>? envelope, string token)
     {
         var kind = statusCode switch
         {
@@ -178,10 +185,10 @@ public sealed class TelegramBotApiClient(HttpClient httpClient) : ITelegramBotAp
             >= HttpStatusCode.InternalServerError => TelegramApiErrorKind.Transient,
             _ => TelegramApiErrorKind.Api
         };
-        TimeSpan? retryAfter = envelope.Parameters?.RetryAfter is int seconds
+        TimeSpan? retryAfter = envelope?.Parameters?.RetryAfter is int seconds
             ? TimeSpan.FromSeconds(seconds)
             : null;
-        string safeDescription = string.IsNullOrWhiteSpace(envelope.Description)
+        string safeDescription = string.IsNullOrWhiteSpace(envelope?.Description)
             ? kind switch
             {
                 TelegramApiErrorKind.Unauthorized => "Telegram rejected the bot credentials.",

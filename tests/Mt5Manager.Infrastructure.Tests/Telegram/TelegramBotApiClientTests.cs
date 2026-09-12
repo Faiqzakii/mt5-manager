@@ -96,6 +96,27 @@ public sealed class TelegramBotApiClientTests
         AssertTokenSafe(error.Which);
     }
 
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized, "", TelegramApiErrorKind.Unauthorized)]
+    [InlineData(HttpStatusCode.Unauthorized, "<html>unauthorized</html>", TelegramApiErrorKind.Unauthorized)]
+    [InlineData(HttpStatusCode.Unauthorized, "{broken", TelegramApiErrorKind.Unauthorized)]
+    [InlineData(HttpStatusCode.BadGateway, "<html>bad gateway</html>", TelegramApiErrorKind.Transient)]
+    public async Task Http_status_classification_does_not_require_a_valid_error_envelope(
+        HttpStatusCode status,
+        string body,
+        TelegramApiErrorKind expectedKind)
+    {
+        var sut = Create(new FakeHandler(Response(status, body)));
+
+        var error = await FluentActions.Awaiting(() => sut.GetUpdatesAsync(Token, 0))
+            .Should().ThrowAsync<TelegramApiException>();
+
+        error.Which.StatusCode.Should().Be(status);
+        error.Which.Kind.Should().Be(expectedKind);
+        error.Which.Description.Should().NotBeNullOrWhiteSpace();
+        AssertTokenSafe(error.Which);
+    }
+
     [Fact]
     public async Task Rate_limit_exposes_retry_after()
     {
