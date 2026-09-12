@@ -212,6 +212,17 @@ public sealed class ViewModelTests
         audit.Records.Should().ContainSingle(x=>x.Operation=="Enable Algo"); row.OperationHistory.Should().ContainSingle(x=>x.Operation=="Enable Algo");
     }
 
+    [Fact] public async Task Algo_service_exception_preserves_error_and_reloads_rejected_history()
+    {
+        var terminal=T(); var process=new Process { State=new(TerminalState.Running,42,null) }; var runtime=new Runtime{Snapshot=NewSnapshot(AlgoTradingState.Disabled)}; var audit=new Audit();
+        var algo=new Algo{Audit=audit,Terminal=terminal,Exception=new InvalidOperationException("controller crashed")};
+        var row=new TerminalRowViewModel(terminal,process,runtime,algo,audit:audit);
+        await row.RefreshStateAsync(); await row.EnableAlgoAsync();
+        row.Error.Should().Be("controller crashed"); row.LastResult.Should().Be("Failed: controller crashed");
+        audit.Records.Should().ContainSingle(x=>x.Operation=="Enable Algo"&&x.Outcome==AuditOutcome.Rejected);
+        row.OperationHistory.Should().ContainSingle(x=>x.Operation=="Enable Algo"&&x.Outcome==AuditOutcome.Rejected.ToString());
+    }
+
     static TerminalAccountSnapshot NewSnapshot(AlgoTradingState state)=>new(1,DateTimeOffset.UtcNow,@"C:\Data",12345,"Trader","Broker-Live","Broker Ltd",AccountTradeMode.Real,true,state,true,true,true);
 
     [Fact] public async Task Cleanup_recovers_after_preparation_exception_and_requires_confirmation()
@@ -330,12 +341,13 @@ public sealed class ViewModelTests
     sealed class Runtime:ITerminalRuntimeInspector{public TerminalAccountSnapshot? Snapshot;public Task<TerminalAccountSnapshot?> ReadAsync(TerminalRegistration t,CancellationToken c=default)=>Task.FromResult(Snapshot);}
     sealed class Algo:IAlgoTradingService
     {
-        public AlgoTradingRequest? Request; public CancellationToken Token; public Audit? Audit; public TerminalRegistration? Terminal;
+        public AlgoTradingRequest? Request; public CancellationToken Token; public Audit? Audit; public TerminalRegistration? Terminal; public Exception? Exception;
         public AlgoTradingOperationResult Result=new(Guid.Empty,"",true,new(true,"ok",null));
         public async Task<AlgoTradingOperationResult> SetAsync(AlgoTradingRequest request,CancellationToken cancellationToken=default)
         {
             Request=request; Token=cancellationToken;
-            if(Audit is not null&&Terminal is not null)await Audit.AppendAsync(OperationRecord(Terminal,request.Enable?"Enable Algo":"Disable Algo",Result.Result.Message));
+            if(Audit is not null&&Terminal is not null)await Audit.AppendAsync(new(DateTimeOffset.UtcNow,Terminal.Id,Terminal.DisplayName,request.Enable?"Enable Algo":"Disable Algo",[],true,ShutdownMethod.None,Exception is null?AuditOutcome.Completed:AuditOutcome.Rejected,Exception?.Message??Result.Result.Message,[],false,null,AlgoOperationSource.Wpf));
+            if(Exception is not null)throw Exception;
             return Result;
         }
     }
