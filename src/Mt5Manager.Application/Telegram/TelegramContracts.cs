@@ -55,3 +55,27 @@ public interface ITelegramBotApi
         CancellationToken cancellationToken = default);
     Task AnswerCallbackAsync(string botToken, string callbackQueryId, string? text = null, CancellationToken cancellationToken = default);
 }
+
+public enum TelegramBotState { Stopped, Running, Unauthorized }
+
+public interface IDelay
+{
+    Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken);
+}
+
+public interface ITelegramBotService : IAsyncDisposable
+{
+    TelegramBotState State { get; }
+    event EventHandler? StateChanged;
+    Task StartAsync(CancellationToken cancellationToken = default);
+    Task StopAsync(CancellationToken cancellationToken = default);
+    Task ApplySettingsAsync(CancellationToken cancellationToken = default);
+}
+
+public enum TelegramBotErrorKind { Unauthorized, RateLimited, Transient }
+
+public sealed class TelegramBotException(TelegramBotErrorKind kind, string message, TimeSpan? retryAfter = null) : Exception(message)
+{
+    public TelegramBotErrorKind Kind { get; } = kind;
+    public TimeSpan? RetryAfter { get; } = retryAfter;
+}
