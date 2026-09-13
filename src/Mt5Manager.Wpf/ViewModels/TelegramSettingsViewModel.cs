@@ -218,6 +218,7 @@ public sealed partial class TelegramSettingsViewModel(
         ConnectionStatus = botService.State switch
         {
             TelegramBotState.Running => "Aktif",
+            TelegramBotState.Conflict => "Token bot sedang digunakan aplikasi MT5 Manager atau VPS lain — terapkan pengaturan atau mulai ulang untuk mencoba lagi",
             TelegramBotState.Unauthorized => "Token/Chat ID tidak valid",
             _ => loadedSettings is { Enabled: true } ? "Menghubungkan" : "Nonaktif"
         };

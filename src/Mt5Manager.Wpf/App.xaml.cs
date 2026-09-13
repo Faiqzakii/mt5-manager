@@ -79,14 +79,15 @@ public partial class App : System.Windows.Application
         services.AddSingleton<ISecretProtector, WindowsUserSecretProtector>();
         services.AddSingleton(httpClient);
         services.AddSingleton<ITelegramBotApi>(sp => new TelegramBotApiClient(sp.GetRequiredService<HttpClient>()));
+        services.AddSingleton<IPublicIpProvider>(sp => new HttpPublicIpProvider(sp.GetRequiredService<HttpClient>()));
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<IDelay, SystemDelay>();
         services.AddSingleton<ITelegramBotService>(sp => new BoundedTelegramBotService(
             new TelegramBotService(sp.GetRequiredService<ITelegramSettingsStore>(),
                 sp.GetRequiredService<ISecretProtector>(), sp.GetRequiredService<ITelegramBotApi>(),
                 sp.GetRequiredService<ITerminalRegistry>(), sp.GetRequiredService<ITerminalRuntimeInspector>(),
-                sp.GetRequiredService<IAlgoTradingService>(), sp.GetRequiredService<TimeProvider>(),
-                sp.GetRequiredService<IDelay>()), ShutdownTimeout));
+                sp.GetRequiredService<IAlgoTradingService>(), sp.GetRequiredService<IPublicIpProvider>(),
+                sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<IDelay>()), ShutdownTimeout));
         services.AddSingleton(sp => new TelegramApplicationLifetime(
             sp.GetRequiredService<ITelegramBotService>(), ShutdownTimeout));
         services.AddTransient<TelegramSettingsViewModel>();

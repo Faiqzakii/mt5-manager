@@ -19,6 +19,16 @@ public sealed class WindowsTerminalAlgoTradingControllerTests
         Marshal.OffsetOf<WindowsTerminalAlgoTradingController.NativeKeyboardInput>("VirtualKey").Should().Be(0);
     }
 
+    [Theory]
+    [InlineData(10u, 20u, 30u, new uint[] { 20, 30 })]
+    [InlineData(10u, 20u, 20u, new uint[] { 20 })]
+    [InlineData(10u, 10u, 30u, new uint[] { 30 })]
+    [InlineData(10u, 10u, 10u, new uint[] { })]
+    public void Input_acquisition_attaches_to_target_and_foreground_threads(uint current, uint target, uint foreground, uint[] expected)
+    {
+        WindowsTerminalAlgoTradingController.RequiredInputAttachments(current, target, foreground).Should().Equal(expected);
+    }
+
     [Fact]
     public async Task Set_is_no_op_when_desired_state_is_already_current()
     {
@@ -95,6 +105,19 @@ public sealed class WindowsTerminalAlgoTradingControllerTests
     }
 
     [Fact]
+    public async Task Set_reports_the_specific_input_acquisition_failure()
+    {
+        var input = new FakeInput { Failure = AlgoTradingInputFailure.ForegroundActivation };
+        var inspector = new FakeInspector(Snapshot(AlgoTradingState.Disabled));
+
+        var result = await new WindowsTerminalAlgoTradingController(inspector, RunningProcess(42), _ => [4242], input, FakeClock()).SetAsync(terminal, true);
+
+        result.Success.Should().BeFalse();
+        result.Message.Should().Be("The MetaTrader 5 window could not be brought to the foreground.");
+        input.Sent.Should().BeEmpty("Ctrl+E must not be injected unless the target window owns the foreground");
+    }
+
+    [Fact]
     public async Task Set_refuses_when_runtime_snapshot_is_unavailable_or_unknown()
     {
         var input = new FakeInput();
@@ -125,13 +148,16 @@ public sealed class WindowsTerminalAlgoTradingControllerTests
         public List<nint> Minimized { get; } = [];
         public List<string> LeaseDisposalOrder { get; } = [];
         public bool LeaseDisposed { get; private set; }
-        public bool TryAcquire(nint window, out IAlgoTradingLease? lease)
+        public AlgoTradingInputFailure Failure { get; init; }
+        public AlgoTradingInputFailure TryAcquire(nint window, out IAlgoTradingLease? lease)
         {
+            lease = null;
+            if (Failure != AlgoTradingInputFailure.None) return Failure;
             Sent.Add((window, true));
             lease = new CallbackLease(
                 () => { Minimized.Add(window); LeaseDisposalOrder.Add("Minimized"); },
                 () => { LeaseDisposed = true; LeaseDisposalOrder.Add("Disposed"); });
-            return true;
+            return AlgoTradingInputFailure.None;
         }
     }
 

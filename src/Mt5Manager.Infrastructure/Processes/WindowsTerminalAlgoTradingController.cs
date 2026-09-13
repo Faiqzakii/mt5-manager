@@ -10,9 +10,18 @@ public interface IAlgoTradingLease : IDisposable
     bool TryMinimize();
 }
 
+public enum AlgoTradingInputFailure
+{
+    None,
+    ForegroundActivation,
+    WindowRestore,
+    ThreadAttachment,
+    InputInjection
+}
+
 public interface IAlgoTradingInput
 {
-    bool TryAcquire(nint window, out IAlgoTradingLease? lease);
+    AlgoTradingInputFailure TryAcquire(nint window, out IAlgoTradingLease? lease);
 }
 
 public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingController
@@ -71,8 +80,9 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
             var windows = windowFinder(state.ProcessId.Value);
             if (windows.Count != 1) return new(false, windows.Count == 0 ? "No matching MetaTrader 5 window was found." : "Several matching MetaTrader 5 windows were found.", current);
 
-            if (!input.TryAcquire(windows[0], out var lease) || lease is null)
-                return new(false, "The Ctrl+E shortcut could not be delivered to the terminal window.", current);
+            var inputFailure = input.TryAcquire(windows[0], out var lease);
+            if (inputFailure != AlgoTradingInputFailure.None || lease is null)
+                return new(false, InputFailureMessage(inputFailure), current);
 
             using (lease)
             {
@@ -95,6 +105,23 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
         finally { gate.Release(); }
     }
 
+    private static string InputFailureMessage(AlgoTradingInputFailure failure) => failure switch
+    {
+        AlgoTradingInputFailure.ForegroundActivation => "The MetaTrader 5 window could not be brought to the foreground.",
+        AlgoTradingInputFailure.WindowRestore => "The MetaTrader 5 window could not be restored.",
+        AlgoTradingInputFailure.ThreadAttachment => "Input could not be attached to the MetaTrader 5 window.",
+        AlgoTradingInputFailure.InputInjection => "The Ctrl+E shortcut could not be injected into the MetaTrader 5 window.",
+        _ => "The Ctrl+E shortcut could not be delivered to the terminal window."
+    };
+
+    public static IReadOnlyList<uint> RequiredInputAttachments(uint currentThread, uint targetThread, uint foregroundThread)
+    {
+        var threads = new List<uint>(2);
+        if (targetThread != currentThread) threads.Add(targetThread);
+        if (foregroundThread != 0 && foregroundThread != currentThread && foregroundThread != targetThread) threads.Add(foregroundThread);
+        return threads;
+    }
+
     private static IReadOnlyList<nint> EnumerateTopLevelWindows(int processId)
     {
         var windows = new List<nint>();
@@ -109,35 +136,51 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
 
     private sealed class Win32AlgoTradingInput : IAlgoTradingInput
     {
-        public bool TryAcquire(nint window, out IAlgoTradingLease? lease)
+        public AlgoTradingInputFailure TryAcquire(nint window, out IAlgoTradingLease? lease)
         {
             lease = null;
             var foreground = GetForegroundWindow();
-            if (window != foreground && !SetForegroundWindow(window)) return false;
-            if (!PostMessage(window, WmSyscommand, ScRestore, 0))
+            if (!PostMessage(window, WmSyscommand, ScRestore, 0)) return AlgoTradingInputFailure.WindowRestore;
+
+            var targetThread = GetWindowThreadProcessId(window, 0);
+            var currentThread = GetCurrentThreadId();
+            var foregroundThread = foreground == nint.Zero ? 0 : GetWindowThreadProcessId(foreground, 0);
+            var attachedThreads = new List<uint>(2);
+            foreach (var thread in RequiredInputAttachments(currentThread, targetThread, foregroundThread))
             {
+                if (AttachThreadInput(currentThread, thread, true))
+                {
+                    attachedThreads.Add(thread);
+                    continue;
+                }
+
+                DetachInputThreads(currentThread, attachedThreads);
                 RestoreForeground(foreground);
-                return false;
+                return AlgoTradingInputFailure.ThreadAttachment;
             }
 
-            var previousThread = GetWindowThreadProcessId(window, 0);
-            var currentThread = GetCurrentThreadId();
-            var attached = previousThread != currentThread;
-            if (attached && !AttachThreadInput(currentThread, previousThread, true))
+            if (window != GetForegroundWindow() && !SetForegroundWindow(window))
             {
+                DetachInputThreads(currentThread, attachedThreads);
                 RestoreForeground(foreground);
-                return false;
+                return AlgoTradingInputFailure.ForegroundActivation;
             }
 
             if (!SendInput([KeyDown(VkControl), KeyDown(VkE), KeyUp(VkE), KeyUp(VkControl)]))
             {
-                if (attached) AttachThreadInput(currentThread, previousThread, false);
+                DetachInputThreads(currentThread, attachedThreads);
                 RestoreForeground(foreground);
-                return false;
+                return AlgoTradingInputFailure.InputInjection;
             }
 
-            lease = new ForegroundLease(window, foreground, currentThread, previousThread, attached);
-            return true;
+            lease = new ForegroundLease(window, foreground, currentThread, attachedThreads);
+            return AlgoTradingInputFailure.None;
+        }
+
+        private static void DetachInputThreads(uint currentThread, IReadOnlyList<uint> attachedThreads)
+        {
+            for (var index = attachedThreads.Count - 1; index >= 0; index--)
+                AttachThreadInput(currentThread, attachedThreads[index], false);
         }
 
         private static void RestoreForeground(nint foreground)
@@ -145,7 +188,7 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
             if (foreground != nint.Zero) SetForegroundWindow(foreground);
         }
 
-        private sealed class ForegroundLease(nint window, nint foreground, uint currentThread, uint previousThread, bool attached) : IAlgoTradingLease
+        private sealed class ForegroundLease(nint window, nint foreground, uint currentThread, IReadOnlyList<uint> attachedThreads) : IAlgoTradingLease
         {
             private bool disposed;
 
@@ -155,7 +198,7 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
             {
                 if (disposed) return;
                 disposed = true;
-                if (attached) AttachThreadInput(currentThread, previousThread, false);
+                DetachInputThreads(currentThread, attachedThreads);
                 RestoreForeground(foreground);
             }
         }

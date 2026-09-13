@@ -83,6 +83,7 @@ public sealed class TelegramBotApiClientTests
 
     [Theory]
     [InlineData(HttpStatusCode.Unauthorized, TelegramApiErrorKind.Unauthorized)]
+    [InlineData(HttpStatusCode.Conflict, TelegramApiErrorKind.Conflict)]
     [InlineData(HttpStatusCode.InternalServerError, TelegramApiErrorKind.Transient)]
     public async Task Http_failures_are_typed_and_token_safe(HttpStatusCode status, TelegramApiErrorKind kind)
     {
@@ -134,6 +135,7 @@ public sealed class TelegramBotApiClientTests
 
     [Theory]
     [InlineData(HttpStatusCode.BadRequest, TelegramApiErrorKind.Api, TelegramBotErrorKind.Permanent)]
+    [InlineData(HttpStatusCode.Conflict, TelegramApiErrorKind.Conflict, TelegramBotErrorKind.Conflict)]
     [InlineData(HttpStatusCode.Forbidden, TelegramApiErrorKind.Unauthorized, TelegramBotErrorKind.Unauthorized)]
     [InlineData(HttpStatusCode.ServiceUnavailable, TelegramApiErrorKind.Transient, TelegramBotErrorKind.Transient)]
     public async Task Bot_error_kind_maps_api_classification(HttpStatusCode status,

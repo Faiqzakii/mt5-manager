@@ -16,34 +16,33 @@ public sealed class TelegramDashboardTests
     }
 
     [Fact]
-    public void Main_dashboard_has_indonesian_status_and_five_actions()
+    public void Main_dashboard_has_compact_status_and_grouped_actions()
     {
-        var message = TelegramDashboard.Main(new TelegramConnectionState(true, "operator", 3, null));
+        var message = TelegramDashboard.Main(new TelegramConnectionState(true, "operator", 3, null), "203.0.113.7");
 
-        message.Text.Should().Be("🤖 MT5 Manager\nStatus: Terhubung\nBot: @operator\nTerminal: 3");
+        message.Text.Should().Be("🤖 MT5 Manager\n🟢 Terhubung · 3 terminal aktif\nBot: @operator\nIP Publik VPS: 203.0.113.7");
         message.Keyboard.Rows.SelectMany(row => row).Select(button => button.Text).Should().Equal(
-            "Status/Refresh", "ON Terminal", "OFF Terminal", "ON Semua", "OFF Semua");
+            "✅ ON Terminal", "⛔ OFF Terminal", "✅ ON Semua", "⛔ OFF Semua", "🔄 Refresh");
         message.Keyboard.Rows.SelectMany(row => row).Select(button => button.CallbackData).Should().Equal(
-            "status", "pick:on", "pick:off", "all:on", "all:off");
+            "pick:on", "pick:off", "all:on", "all:off", "status");
     }
 
     [Fact]
-    public void Terminal_picker_uses_name_and_login_and_only_id_plus_opaque_token_in_callback()
+    public void Terminal_picker_displays_server_login_account_name_and_compact_buttons()
     {
         var terminals = new[]
         {
-            new TelegramTerminal(FirstId, "Alpha", "12345", true),
-            new TelegramTerminal(Guid.NewGuid(), "Beta", null, false)
+            new TelegramTerminal(FirstId, "Alpha", "12345", true, false, "Exness-MT5Real3", "Budi Santoso")
         };
 
         var message = TelegramDashboard.TerminalPicker(true, terminals, "opaque7");
 
-        message.Text.Should().Be("Pilih terminal untuk mengaktifkan Algo Trading:");
-        message.Keyboard.Rows[0][0].Text.Should().Be("Alpha — 12345");
+        message.Text.Should().Contain("🏦 Exness-MT5Real3");
+        message.Text.Should().Contain("👤 Budi Santoso");
+        message.Text.Should().Contain("🔢 12345 · 🔴 OFF");
+        message.Keyboard.Rows[0][0].Text.Should().Be("Exness-MT5Real3 · 12345");
+        message.Keyboard.Rows[^1][0].Text.Should().Be("↩️ Kembali");
         message.Keyboard.Rows[0][0].CallbackData.Should().Be($"terminal:on:{FirstId:N}:opaque7");
-        message.Keyboard.Rows[1][0].Text.Should().Be("Beta — akun tidak tersedia");
-        message.Keyboard.Rows.SelectMany(x => x).Select(x => x.CallbackData)
-            .Should().OnlyContain(value => !value.Contains("Alpha") && !value.Contains("12345"));
     }
 
     [Fact]
@@ -53,8 +52,7 @@ public sealed class TelegramDashboardTests
 
         var message = TelegramDashboard.TerminalPicker(true, [terminal], "opaque7");
 
-        message.Keyboard.Rows[0][0].Text.Should().Be("Alpha — akun tidak tersedia");
-        message.Keyboard.Rows[0][0].Text.Should().NotContain("stale-login");
+        message.Keyboard.Rows[0][0].Text.Should().Be("Alpha · akun tidak tersedia");
     }
 
     [Fact]
@@ -68,13 +66,19 @@ public sealed class TelegramDashboardTests
             new TelegramTerminal(Guid.NewGuid(), "Beta", null, false, null)
         ], "B4");
 
-        single.Text.Should().Be("Alpha — 12345\nStatus saat ini: ON\nStatus diminta: OFF\nLanjutkan?");
+        single.Text.Should().Be("Alpha — 12345\nStatus saat ini: ON\nStatus diminta: OFF\n\nGlobal Algo Trading memengaruhi setiap EA di terminal ini.\nLanjutkan?");
         single.Keyboard.Rows.SelectMany(x => x).Select(x => x.CallbackData).Should().Equal("confirm:S3", "cancel:S3");
-        bulk.Text.Should().Be(
-            "Aktifkan Algo Trading untuk semua 2 terminal?\n" +
-            "• Alpha — 12345 (OFF)\n" +
-            "• Beta — akun tidak tersedia (tidak diketahui)");
         bulk.Keyboard.Rows.SelectMany(x => x).Select(x => x.CallbackData).Should().Equal("confirm:B4", "cancel:B4");
+        bulk.Text.Should().Be(
+            "⚠️ Aktifkan Algo Trading untuk 2 terminal?\n\n" +
+            "• Alpha — 12345 (OFF)\n" +
+            "• Beta — akun tidak tersedia (tidak diketahui)\n\n" +
+            "Global Algo Trading memengaruhi setiap EA di setiap terminal yang tercantum.");
+        single.Text.Should().Contain("Global Algo Trading").And.Contain("setiap EA di terminal ini");
+        bulk.Text.Should().Contain("Global Algo Trading").And.Contain("setiap EA di setiap terminal");
+
+        TelegramDashboard.Main(new TelegramConnectionState(true, "operator", 3, null), null).Text
+            .Should().Contain("IP Publik VPS: tidak tersedia");
     }
 
     [Fact]

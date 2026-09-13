@@ -12,6 +12,7 @@ public sealed class TelegramBotService : ITelegramBotService
     private readonly ITerminalRegistry registry;
     private readonly ITerminalRuntimeInspector runtime;
     private readonly IAlgoTradingService algo;
+    private readonly IPublicIpProvider publicIp;
     private readonly TimeProvider clock;
     private readonly IDelay delay;
     private readonly SemaphoreSlim lifecycle = new(1, 1);
@@ -23,10 +24,10 @@ public sealed class TelegramBotService : ITelegramBotService
 
     public TelegramBotService(ITelegramSettingsStore settingsStore, ISecretProtector protector, ITelegramBotApi api,
         ITerminalRegistry registry, ITerminalRuntimeInspector runtime, IAlgoTradingService algo,
-        TimeProvider clock, IDelay delay)
+        IPublicIpProvider publicIp, TimeProvider clock, IDelay delay)
     {
         this.settingsStore = settingsStore; this.protector = protector; this.api = api; this.registry = registry;
-        this.runtime = runtime; this.algo = algo; this.clock = clock; this.delay = delay;
+        this.runtime = runtime; this.algo = algo; this.publicIp = publicIp; this.clock = clock; this.delay = delay;
     }
 
     public TelegramBotState State { get; private set; } = TelegramBotState.Stopped;
@@ -34,22 +35,35 @@ public sealed class TelegramBotService : ITelegramBotService
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
-        await lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        while (true)
         {
-            if (pollingTask is { IsCompleted: false }) return;
-            pollingCancellation?.Dispose();
-            pollingCancellation = null;
-            pollingTask = null;
-            token = null;
-            settings = await settingsStore.LoadAsync(cancellationToken).ConfigureAwait(false);
-            if (settings is null || !settings.Enabled) return;
-            token = protector.Unprotect(settings.BotToken);
-            pollingCancellation = new CancellationTokenSource();
-            SetState(TelegramBotState.Running);
-            pollingTask = Task.Run(() => PollAsync(pollingCancellation.Token), CancellationToken.None);
+            await lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
+            Task exiting;
+            try
+            {
+                if (pollingTask is { IsCompleted: false } current)
+                {
+                    if (State == TelegramBotState.Running) return;
+                    exiting = current; // terminal-state poller is still unwinding (StateChanged fires from inside it); wait for its exit so an explicit restart is never lost and owners never overlap
+                }
+                else
+                {
+                    pollingCancellation?.Dispose();
+                    pollingCancellation = null;
+                    pollingTask = null;
+                    token = null;
+                    settings = await settingsStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+                    if (settings is null || !settings.Enabled) return;
+                    token = protector.Unprotect(settings.BotToken);
+                    pollingCancellation = new CancellationTokenSource();
+                    SetState(TelegramBotState.Running);
+                    pollingTask = Task.Run(() => PollAsync(pollingCancellation.Token), CancellationToken.None);
+                    return;
+                }
+            }
+            finally { lifecycle.Release(); }
+            await exiting.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
-        finally { lifecycle.Release(); }
     }
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
@@ -100,6 +114,7 @@ public sealed class TelegramBotService : ITelegramBotService
                 {
                     var (kind, retryAfter) = Classify(error);
                     if (kind == TelegramBotErrorKind.Unauthorized) { SetState(TelegramBotState.Unauthorized); break; }
+                    if (kind == TelegramBotErrorKind.Conflict) { SetState(TelegramBotState.Conflict); break; }
                     var wait = kind == TelegramBotErrorKind.RateLimited && retryAfter is not null
                         ? retryAfter.Value : TimeSpan.FromSeconds(Math.Min(30, 1 << Math.Min(failures++, 4)));
                     try { await delay.DelayAsync(wait, cancellationToken).ConfigureAwait(false); }
@@ -107,7 +122,7 @@ public sealed class TelegramBotService : ITelegramBotService
                 }
             }
         }
-        finally { if (State != TelegramBotState.Unauthorized) SetState(TelegramBotState.Stopped); }
+        finally { if (State is not (TelegramBotState.Unauthorized or TelegramBotState.Conflict)) SetState(TelegramBotState.Stopped); }
     }
 
     private async Task<bool> HandleUpdateAsync(TelegramUpdate update, CancellationToken cancellationToken)
@@ -206,7 +221,8 @@ public sealed class TelegramBotService : ITelegramBotService
     {
         var (registration, snapshot) = await FreshAsync(ids[0], ct).ConfigureAwait(false);
         if (registration is null || snapshot is null) { await DeliverAsync(chatId, messageId, new TelegramMessage("Terminal tidak tersedia.", new([])), true, ct); return; }
-        var terminal = new TelegramTerminal(registration.Id, registration.DisplayName, snapshot.Login.ToString(), true, snapshot.GlobalAlgoTrading == AlgoTradingState.Enabled);
+        var terminal = new TelegramTerminal(registration.Id, registration.DisplayName, snapshot.Login.ToString(), true,
+            snapshot.GlobalAlgoTrading == AlgoTradingState.Enabled, snapshot.Server, snapshot.AccountName);
         var key = Store(chatId, messageId, enable, ids);
         BindMessage(key, await DeliverAsync(chatId, messageId, TelegramDashboard.ConfirmTerminal(enable, snapshot.GlobalAlgoTrading == AlgoTradingState.Enabled, terminal, key), true, ct).ConfigureAwait(false));
     }
@@ -223,10 +239,10 @@ public sealed class TelegramBotService : ITelegramBotService
             {
                 var operation = await algo.SetAsync(new(id, enable, AlgoOperationSource.Telegram), ct).ConfigureAwait(false);
                 var already = operation.Result.Success && operation.Result.Message.Contains("already", StringComparison.OrdinalIgnoreCase);
-                results.Add(new(id, registration?.DisplayName ?? operation.TerminalName, snapshot?.Login.ToString(), enable, operation.Result.Success ? (already ? TelegramTerminalOutcome.AlreadyInRequestedState : TelegramTerminalOutcome.Changed) : TelegramTerminalOutcome.Failed, operation.Result.Success ? null : operation.Result.Message));
+                results.Add(new(id, registration?.DisplayName ?? operation.TerminalName, snapshot?.Login.ToString(), enable, operation.Result.Success ? (already ? TelegramTerminalOutcome.AlreadyInRequestedState : TelegramTerminalOutcome.Changed) : TelegramTerminalOutcome.Failed, operation.Result.Success ? null : operation.Result.Message, snapshot?.Server, snapshot?.AccountName));
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception) { results.Add(new(id, registration?.DisplayName ?? "Terminal", snapshot?.Login.ToString(), enable, TelegramTerminalOutcome.Failed, "Operasi tidak dapat diselesaikan karena kesalahan lokal.")); }
+            catch (Exception) { results.Add(new(id, registration?.DisplayName ?? "Terminal", snapshot?.Login.ToString(), enable, TelegramTerminalOutcome.Failed, "Operasi tidak dapat diselesaikan karena kesalahan lokal.", snapshot?.Server, snapshot?.AccountName)); }
         }
         foreach (var text in TelegramDashboard.Results(results)) await api.SendMessageAsync(token!, chatId, new(text, new([])), ct).ConfigureAwait(false);
     }
@@ -237,15 +253,24 @@ public sealed class TelegramBotService : ITelegramBotService
         foreach (var registration in registrations)
         {
             var snapshot = await runtime.ReadAsync(registration, ct).ConfigureAwait(false);
-            result.Add(new(registration.Id, registration.DisplayName, snapshot?.Login.ToString(), snapshot is not null,
-                snapshot is null ? null : snapshot.GlobalAlgoTrading == AlgoTradingState.Enabled));
+            if (snapshot is null) continue;
+            result.Add(new(registration.Id, registration.DisplayName, snapshot.Login.ToString(), true,
+                snapshot.GlobalAlgoTrading == AlgoTradingState.Enabled, snapshot.Server, snapshot.AccountName));
         }
         return result;
     }
     private async Task<(TerminalRegistration? Registration, TerminalAccountSnapshot? Snapshot)> FreshAsync(Guid id, CancellationToken ct)
     { var registration = (await registry.LoadAsync(ct).ConfigureAwait(false)).FirstOrDefault(x => x.Id == id); return (registration, registration is null ? null : await runtime.ReadAsync(registration, ct).ConfigureAwait(false)); }
     private async Task SendDashboardAsync(long chatId, CancellationToken ct)
-    { var connection = await api.GetConnectionStateAsync(token!, ct).ConfigureAwait(false); var count = (await registry.LoadAsync(ct).ConfigureAwait(false)).Count; await api.SendMessageAsync(token!, chatId, TelegramDashboard.Main(connection with { TerminalCount = count }), ct).ConfigureAwait(false); }
+    {
+        var connection = await api.GetConnectionStateAsync(token!, ct).ConfigureAwait(false);
+        var count = (await LoadTerminalsAsync(ct).ConfigureAwait(false)).Count;
+        string? address;
+        try { address = await publicIp.GetAsync(ct).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { address = null; }
+        await api.SendMessageAsync(token!, chatId, TelegramDashboard.Main(connection with { TerminalCount = count }, address), ct).ConfigureAwait(false);
+    }
     private async Task<long> DeliverAsync(long chatId, long messageId, TelegramMessage message, bool edit, CancellationToken ct)
     { if (edit) try { await api.EditMessageAsync(token!, chatId, messageId, message, ct).ConfigureAwait(false); return messageId; } catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; } catch { } return await api.SendMessageAsync(token!, chatId, message, ct).ConfigureAwait(false); }
     private Task InvalidAsync(TelegramCallbackQuery callback, CancellationToken ct) => api.SendMessageAsync(token!, callback.ChatId, new("Konfirmasi tidak valid atau kedaluwarsa.", new([])), ct);

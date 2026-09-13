@@ -20,13 +20,14 @@ public sealed partial class MainViewModel(ITerminalDiscovery discovery,ITerminal
 public sealed partial class TerminalRowViewModel(TerminalRegistration terminal,ITerminalProcessController process,ITerminalRuntimeInspector? runtime=null,IAlgoTradingService? algo=null,ITerminalStorageInspector? storage=null,IAuditLogger? audit=null):ObservableObject
 {
     public TerminalRegistration Terminal=>terminal;public string DisplayName=>terminal.DisplayName;public string ExecutablePath=>terminal.ExecutablePath;public string DataDirectory=>terminal.DataDirectory;
+    public string GlobalAlgoTradingWarning=>"Global Algo Trading affects every EA in this terminal.";
     public ObservableCollection<OperationLogEntry> OperationHistory{get;}=[];
     [ObservableProperty][NotifyCanExecuteChangedFor(nameof(StartCommand),nameof(StopCommand),nameof(RestartCommand),nameof(EnableAlgoCommand),nameof(DisableAlgoCommand))]TerminalState state=TerminalState.Busy;
     [ObservableProperty][NotifyCanExecuteChangedFor(nameof(StartCommand),nameof(StopCommand),nameof(RestartCommand),nameof(EnableAlgoCommand),nameof(DisableAlgoCommand),nameof(InspectStorageCommand))][NotifyPropertyChangedFor(nameof(CanCleanup),nameof(CanInspectStorage),nameof(CanEnableAlgo),nameof(CanDisableAlgo))]bool isBusy;
     [ObservableProperty][NotifyCanExecuteChangedFor(nameof(EnableAlgoCommand),nameof(DisableAlgoCommand))]TerminalAccountSnapshot? account;
     [ObservableProperty]string? error;[ObservableProperty]int? processId;[ObservableProperty]string storageSummary="Storage not inspected";[ObservableProperty]string lastResult="No operations yet";
     [ObservableProperty]string accountSummary="Bridge unavailable";[ObservableProperty]string algoSummary="Algo Trading unknown";
-    public bool CanStart=>!IsBusy&&State is TerminalState.Stopped or TerminalState.Error;public bool CanStop=>!IsBusy&&State==TerminalState.Running;public bool CanRestart=>CanStop;public bool CanCleanup=>!IsBusy&&terminal.DataDirectoryVerified;public bool CanInspectStorage=>!IsBusy&&terminal.DataDirectoryVerified&&storage is not null;
+    public bool CanStart=>!IsBusy&&State is TerminalState.Stopped or TerminalState.Error;public bool CanStop=>!IsBusy&&terminal.DataDirectoryVerified&&!string.IsNullOrWhiteSpace(terminal.DataDirectory)&&State==TerminalState.Running;public bool CanRestart=>CanStop;public bool CanCleanup=>!IsBusy&&terminal.DataDirectoryVerified&&!string.IsNullOrWhiteSpace(terminal.DataDirectory);public bool CanInspectStorage=>!IsBusy&&terminal.DataDirectoryVerified&&storage is not null;
     public bool CanEnableAlgo=>CanControlAlgo&&Account?.GlobalAlgoTrading is AlgoTradingState.Disabled;
     public bool CanDisableAlgo=>CanControlAlgo&&Account?.GlobalAlgoTrading is AlgoTradingState.Enabled;
     bool CanControlAlgo=>!IsBusy&&State==TerminalState.Running&&runtime is not null&&algo is not null&&terminal.DataDirectoryVerified&&Account is not null&&Account.GlobalAlgoTrading!=AlgoTradingState.Unknown;

@@ -9,6 +9,7 @@ namespace Mt5Manager.Infrastructure.Telegram;
 public enum TelegramApiErrorKind
 {
     Api,
+    Conflict,
     Unauthorized,
     RateLimited,
     Transient,
@@ -35,6 +36,7 @@ public sealed class TelegramApiException : Exception, ITelegramBotApiError
     public TelegramBotErrorKind BotErrorKind => Kind switch
     {
         TelegramApiErrorKind.Unauthorized => TelegramBotErrorKind.Unauthorized,
+        TelegramApiErrorKind.Conflict => TelegramBotErrorKind.Conflict,
         TelegramApiErrorKind.RateLimited => TelegramBotErrorKind.RateLimited,
         TelegramApiErrorKind.Api => TelegramBotErrorKind.Permanent,
         _ => TelegramBotErrorKind.Transient
@@ -188,6 +190,7 @@ public sealed class TelegramBotApiClient(HttpClient httpClient) : ITelegramBotAp
         var kind = statusCode switch
         {
             HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => TelegramApiErrorKind.Unauthorized,
+            HttpStatusCode.Conflict => TelegramApiErrorKind.Conflict,
             (HttpStatusCode)429 => TelegramApiErrorKind.RateLimited,
             >= HttpStatusCode.InternalServerError => TelegramApiErrorKind.Transient,
             _ => TelegramApiErrorKind.Api
@@ -199,6 +202,7 @@ public sealed class TelegramBotApiClient(HttpClient httpClient) : ITelegramBotAp
             ? kind switch
             {
                 TelegramApiErrorKind.Unauthorized => "Telegram rejected the bot credentials.",
+                TelegramApiErrorKind.Conflict => "Telegram bot token is already used by another polling consumer.",
                 TelegramApiErrorKind.RateLimited => "Telegram rate limit exceeded.",
                 TelegramApiErrorKind.Transient => "Telegram is temporarily unavailable.",
                 _ => "Telegram rejected the request."

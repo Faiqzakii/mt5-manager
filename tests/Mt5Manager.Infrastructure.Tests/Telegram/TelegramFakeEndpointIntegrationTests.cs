@@ -34,7 +34,7 @@ public sealed class TelegramFakeEndpointIntegrationTests : IDisposable
         var protector = new WindowsUserSecretProtector();
         var store = new JsonTelegramSettingsStore(settingsPath);
         var api = new TelegramBotApiClient(new HttpClient(http));
-        await using var bot = new TelegramBotService(store, protector, api, registry, runtime, algo, TimeProvider.System, new ImmediateDelay());
+        await using var bot = new TelegramBotService(store, protector, api, registry, runtime, algo, new NoPublicIp(), TimeProvider.System, new ImmediateDelay());
 
         var alphaId = Guid.NewGuid();
         var bravoId = Guid.NewGuid();
@@ -63,40 +63,40 @@ public sealed class TelegramFakeEndpointIntegrationTests : IDisposable
         protector.Unprotect(persisted.BotToken).Should().Be(BotToken);
 
         // Initial update was queued before polling started to keep this fake endpoint deterministic.
-        await WaitAsync(() => http.Sent.Any(message => message.Text.Contains("Terminal: 2")));
+        await WaitAsync(() => http.Sent.Any(message => message.Text.Contains("1 terminal aktif")));
+        http.Sent.Should().Contain(message => message.Text.Contains("IP Publik VPS: tidak tersedia"));
         http.Enqueue("getUpdates", UpdatesResult(new Update(101, new IncomingMessage(ChatId, 2, "/on_all"), null)));
         await WaitAsync(() => http.Sent.Count >= 2);
         http.Sent.Should().Contain(message =>
-            message.Text.Contains("Aktifkan Algo Trading untuk semua 2 terminal?") &&
-            message.Text.Contains("Alpha — 111 (OFF)") &&
-            message.Text.Contains("Bravo — akun tidak tersedia (tidak diketahui)"));
+            message.Text.Contains("Aktifkan Algo Trading untuk 1 terminal?") &&
+            message.Text.Contains("Server · 111 · Account · 🔴 OFF") &&
+            !message.Text.Contains("Bravo"));
         http.Sent.Should().Contain(message =>
             message.Keyboard.Rows.Count == 3 &&
-            message.Keyboard.Rows[0][0].CallbackData == "status" &&
-            message.Keyboard.Rows[1][0].CallbackData == "pick:on" &&
-            message.Keyboard.Rows[1][1].CallbackData == "pick:off" &&
-            message.Keyboard.Rows[2][0].CallbackData == "all:on" &&
-            message.Keyboard.Rows[2][1].CallbackData == "all:off");
+            message.Keyboard.Rows[0][0].CallbackData == "pick:on" &&
+            message.Keyboard.Rows[0][1].CallbackData == "pick:off" &&
+            message.Keyboard.Rows[1][0].CallbackData == "all:on" &&
+            message.Keyboard.Rows[1][1].CallbackData == "all:off" &&
+            message.Keyboard.Rows[2][0].CallbackData == "status");
 
-        var confirmation = http.Sent.First(message => message.Text.Contains("Aktifkan Algo Trading untuk semua 2 terminal?")).Keyboard.Rows[0][0].CallbackData;
+        var confirmation = http.Sent.First(message => message.Text.Contains("Aktifkan Algo Trading untuk 1 terminal?")).Keyboard.Rows[0][0].CallbackData;
         confirmation.Should().StartWith("confirm:");
 
         http.Enqueue("getUpdates", UpdatesResult(new Update(102, null, new CallbackQuery("answer", ChatId, 9, confirmation))));
         await WaitAsync(() => http.Calls.Any(call => call.Method == "answerCallbackQuery" && call.CallbackId == "answer"));
-        await WaitAsync(() => algo.Requests.Count == 2);
-        algo.Requests.Should().Contain(request => request.TerminalId == alphaId && request.Enable && request.Source == AlgoOperationSource.Telegram);
+        await WaitAsync(() => algo.Requests.Count == 1);
+        algo.Requests.Should().ContainSingle(request => request.TerminalId == alphaId && request.Enable && request.Source == AlgoOperationSource.Telegram);
         await WaitAsync(() => http.Edited.Any(message => message.Text.Contains("sedang diproses")),
             $"no in-progress edit; edited={string.Join(" | ", http.Edited.Select(message => message.Text))}");
         await WaitAsync(() =>
-            http.Sent.Any(message => message.Text.Contains("Berhasil") && message.Text.Contains("Alpha — 111")) &&
-            http.Sent.Any(message => message.Text.Contains("Gagal") && message.Text.Contains("Bravo") && message.Text.Contains("akun tidak tersedia")) &&
-            http.Sent.Any(message => message.Text.Contains("Status: Terhubung")),
+            http.Sent.Any(message => message.Text.Contains("Berhasil") && message.Text.Contains("Server · 111 · Account")) &&
+            http.Sent.Any(message => message.Text.Contains("🟢 Terhubung")),
             $"no bulk result or refreshed dashboard; sent={string.Join(" | ", http.Sent.Select(message => message.Text))}; algo={algo.Requests.Count}");
 
         http.Enqueue("getUpdates", UpdatesResult(new Update(103, null, new CallbackQuery("replay", ChatId, 2, confirmation))));
         await WaitAsync(() => http.Calls.Any(call => call.Method == "answerCallbackQuery" && call.CallbackId == "replay"));
         await WaitAsync(() => http.Sent.Any(message => message.Text.Contains("Konfirmasi tidak valid atau kedaluwarsa.")));
-        algo.Requests.Should().HaveCount(2);
+        algo.Requests.Should().ContainSingle();
 
         await bot.StopAsync().WaitAsync(Timeout);
         bot.State.Should().Be(TelegramBotState.Stopped);
@@ -317,5 +317,10 @@ public sealed class TelegramFakeEndpointIntegrationTests : IDisposable
             return Task.FromResult(Results.GetValueOrDefault(request.TerminalId) ??
                 new AlgoTradingOperationResult(request.TerminalId, "Terminal", request.Enable, new(false, "failed", null)));
         }
+    }
+
+    private sealed class NoPublicIp : IPublicIpProvider
+    {
+        public Task<string?> GetAsync(CancellationToken cancellationToken = default) => Task.FromResult<string?>(null);
     }
 }

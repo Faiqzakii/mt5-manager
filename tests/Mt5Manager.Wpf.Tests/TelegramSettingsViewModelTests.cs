@@ -7,6 +7,14 @@ namespace Mt5Manager.Wpf.Tests;
 public sealed class TelegramSettingsViewModelTests
 {
     const string Token = "123456:top-secret-token";
+    [Fact]
+    public void Conflict_state_exposes_actionable_ownership_status()
+    {
+        var f = new Fixture();
+        f.ViewModel.AttachToBotState();
+        f.Bot.SetState(TelegramBotState.Conflict);
+        f.ViewModel.ConnectionStatus.Should().Contain("aplikasi MT5 Manager atau VPS lain");
+    }
 
     [Theory]
     [InlineData("")]

@@ -27,10 +27,69 @@ public sealed class TelegramBotServiceTests
     public async Task Dashboard_commands_use_fresh_registry_data(string command)
     {
         await using var f = new Fixture();
-        f.Registry.Items.Add(f.Registration());
+        f.AvailableTerminal();
         f.Api.Updates.Enqueue([new(0, new(42, 8, command), null)]);
         await f.RunAsync(1);
-        f.Api.Sent.Should().ContainSingle(x => x.Message.Text.Contains("Terminal: 1"));
+        f.Api.Sent.Should().ContainSingle(x => x.Message.Text.Contains("1 terminal aktif"));
+    }
+    [Theory]
+    [InlineData("/start")]
+    [InlineData("/menu")]
+    [InlineData("/status")]
+    public async Task Dashboard_commands_include_public_IP_and_survive_provider_failure(string command)
+    {
+        await using var f = new Fixture();
+        f.PublicIp.Value = "203.0.113.7";
+        f.Api.Updates.Enqueue([new(0, new(42, 8, command), null)]);
+        await f.RunAsync(1);
+        f.Api.Sent.Should().ContainSingle(x => x.Message.Text.Contains("IP Publik VPS: 203.0.113.7"));
+
+        await using var failed = new Fixture();
+        failed.PublicIp.Error = new HttpRequestException("down");
+        failed.Api.Updates.Enqueue([new(0, new(42, 8, command), null)]);
+        await failed.RunAsync(1);
+        failed.Api.Sent.Should().ContainSingle(x => x.Message.Text.Contains("IP Publik VPS: tidak tersedia"));
+    }
+
+    [Fact]
+    public async Task Conflict_stops_polling_without_retry_and_persists_state()
+    {
+        await using var f = new Fixture();
+        f.Api.Errors.Enqueue(new TelegramBotException(TelegramBotErrorKind.Conflict, "duplicate consumer"));
+        await f.Service.StartAsync();
+        await f.WaitStateAsync(TelegramBotState.Conflict);
+        await Task.Delay(25);
+        f.Service.State.Should().Be(TelegramBotState.Conflict);
+        f.Api.Offsets.Should().ContainSingle();
+        f.Delay.Values.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Explicit_StartAsync_from_conflict_StateChanged_restarts_a_single_fresh_poll()
+    {
+        await using var f = new Fixture();
+        f.Api.Errors.Enqueue(new TelegramBotException(TelegramBotErrorKind.Conflict, "duplicate consumer"));
+        var observed = new List<TelegramBotState>();
+        Task? restart = null;
+        f.Service.StateChanged += (_, _) =>
+        {
+            observed.Add(f.Service.State);
+            if (f.Service.State == TelegramBotState.Conflict) restart = f.Service.StartAsync();
+        };
+        await f.Service.StartAsync();
+
+        var until = DateTime.UtcNow.AddSeconds(2);
+        while (f.Api.Offsets.Count < 2 && DateTime.UtcNow < until) await Task.Delay(5);
+
+        f.Api.Offsets.Count.Should().BeGreaterThanOrEqualTo(2);
+        f.Api.MaxConcurrentPolls.Should().Be(1);
+        f.Delay.Values.Should().BeEmpty();
+        restart.Should().NotBeNull();
+        await restart!.WaitAsync(TimeSpan.FromSeconds(2));
+        observed.Should().ContainInOrder(TelegramBotState.Running, TelegramBotState.Conflict, TelegramBotState.Running);
+        f.Service.State.Should().Be(TelegramBotState.Running);
+        await f.Service.StopAsync();
+        f.Service.State.Should().Be(TelegramBotState.Stopped);
     }
 
     [Theory]
@@ -50,6 +109,23 @@ public sealed class TelegramBotServiceTests
         await f.RunAsync(1);
         f.Api.Sent.Should().ContainSingle();
         f.Api.Sent[0].Message.Keyboard.Rows.SelectMany(x => x).Should().Contain(x => x.CallbackData.StartsWith(callbackPrefix));
+    }
+
+    [Fact]
+    public async Task Dashboard_and_bulk_confirmation_include_only_terminals_with_valid_bridge_snapshots()
+    {
+        await using var f = new Fixture();
+        var available = f.AvailableTerminal("Available");
+        var unavailable = f.Registration("Unavailable"); f.Registry.Items.Add(unavailable);
+
+        f.Api.Updates.Enqueue([new(0, new(42, 8, "/start"), null), new(1, new(42, 9, "/on_all"), null)]);
+        await f.RunAsync(2);
+
+        f.Api.Sent.Should().Contain(message => message.Message.Text.Contains("1 terminal aktif"));
+        var confirmation = f.Api.Sent.Select(x => x.Message).Single(message => message.Text.Contains("Aktifkan Algo Trading"));
+        confirmation.Text.Should().Contain("Server · 123456 · Name").And.NotContain("Unavailable");
+        confirmation.Text.Should().Contain("untuk 1 terminal");
+        confirmation.Keyboard.Rows.SelectMany(row => row).Should().Contain(button => button.CallbackData.StartsWith("confirm:"));
     }
 
     [Fact]
@@ -228,14 +304,14 @@ public sealed class TelegramBotServiceTests
         f.Runtime.Snapshots[bravo.Id] = f.Snapshot() with { Login = 654321 };
         var confirmation = await f.CreateConfirmationAsync("/on_all");
 
-        f.Api.LastDelivered.Text.Should().Contain("Alpha — 123456 (ON)");
-        f.Api.LastDelivered.Text.Should().Contain("Bravo — 654321 (OFF)");
+        f.Api.LastDelivered.Text.Should().Contain("Server · 123456 · Name · 🟢 ON");
+        f.Api.LastDelivered.Text.Should().Contain("Server · 654321 · Name · 🔴 OFF");
         f.Api.Sent.Clear(); f.Api.Edits.Clear();
         await f.SendCallbacksAsync(new TelegramCallbackQuery("go", 42, 9, confirmation));
 
         f.Api.Edits.Should().Contain(message => message.Text.Contains("sedang diproses"));
         f.Api.Sent.Should().Contain(message => message.Message.Text.Contains("Berhasil"));
-        f.Api.Sent.Last().Message.Text.Should().Contain("Status: Terhubung");
+        f.Api.Sent.Last().Message.Text.Should().Contain("🟢 Terhubung");
     }
 
     [Fact]
@@ -249,7 +325,7 @@ public sealed class TelegramBotServiceTests
         await f.SendCallbacksAsync(new TelegramCallbackQuery("cancel", 42, 9, confirmation.Replace("confirm:", "cancel:")));
 
         f.Api.Edits.Should().Contain(message => message.Text == "Dibatalkan.");
-        f.Api.Sent.Should().Contain(message => message.Message.Text.Contains("Status: Terhubung"));
+        f.Api.Sent.Should().Contain(message => message.Message.Text.Contains("🟢 Terhubung"));
         f.Algo.Requests.Should().BeEmpty();
     }
 
@@ -313,12 +389,12 @@ public sealed class TelegramBotServiceTests
     private sealed class Fixture : IAsyncDisposable
     {
         public FakeSettings Settings { get; } = new(); public FakeApi Api { get; } = new(); public FakeRegistry Registry { get; } = new();
-        public FakeRuntime Runtime { get; } = new(); public FakeAlgo Algo { get; } = new(); public FakeTimeProvider Clock { get; } = new(); public FakeDelay Delay { get; } = new(); public Protector Protector { get; } = new();
+        public FakeRuntime Runtime { get; } = new(); public FakeAlgo Algo { get; } = new(); public FakeTimeProvider Clock { get; } = new(); public FakeDelay Delay { get; } = new(); public Protector Protector { get; } = new(); public FakePublicIp PublicIp { get; } = new();
         public TelegramBotService Service { get; }
         public TerminalRegistration Registration(string name = "Terminal") => new(Guid.NewGuid(), name, "exe", "data", "work", [], DiscoverySource.Manual, true);
         public TerminalAccountSnapshot Snapshot() => new(1, Clock.GetUtcNow(), "data", 123456, "Name", "Server", "Company", AccountTradeMode.Demo, true, AlgoTradingState.Disabled, true, true, true);
         public TerminalRegistration AvailableTerminal(string name = "Terminal") { var registration = Registration(name); Registry.Items.Add(registration); Runtime.Snapshots[registration.Id] = Snapshot(); return registration; }
-        public Fixture() { Algo.OnSet = () => Api.Calls.Add("algo"); Service = new(Settings, Protector, Api, Registry, Runtime, Algo, Clock, Delay); }
+        public Fixture() { Algo.OnSet = () => Api.Calls.Add("algo"); Service = new(Settings, Protector, Api, Registry, Runtime, Algo, PublicIp, Clock, Delay); }
         public async Task RunAsync(long expectedOffset) { await Service.StartAsync(); await Settings.WaitOffsetAsync(expectedOffset); await Service.StopAsync(); }
         public async Task<string> CreateConfirmationAsync(string command, long update = 0) { Api.Updates.Enqueue([new(update, new(42, 1, command), null)]); await RunAsync(update + 1); return Api.Sent.Select(x => x.Message).Last(message => message.Keyboard.Rows.SelectMany(row => row).Any(button => button.CallbackData.StartsWith("confirm:"))).Keyboard.Rows.SelectMany(x => x).Single(x => x.CallbackData.StartsWith("confirm:")).CallbackData; }
         public async Task<string> CreatePickerAsync(string command) { Api.Updates.Enqueue([new(0, new(42, 1, command), null)]); await RunAsync(1); return Api.LastDelivered.Keyboard.Rows.SelectMany(x => x).First(x => x.CallbackData.StartsWith("terminal:")).CallbackData; }
@@ -336,6 +412,11 @@ public sealed class TelegramBotServiceTests
         public async Task WaitOffsetAsync(long offset) { var until = DateTime.UtcNow.AddSeconds(2); while (Current.UpdateOffset < offset && DateTime.UtcNow < until) await Task.Delay(5); Current.UpdateOffset.Should().Be(offset); }
     }
     private sealed class Protector : ISecretProtector { public List<string> UnprotectedTokens { get; } = []; public ProtectedTelegramToken Protect(string plaintext) => new(plaintext); public string Unprotect(ProtectedTelegramToken protectedValue) { lock (UnprotectedTokens) UnprotectedTokens.Add(protectedValue.Value); return "secret"; } public void ClearUnprotected() { lock (UnprotectedTokens) UnprotectedTokens.Clear(); } }
+    private sealed class FakePublicIp : IPublicIpProvider
+    {
+        public string? Value; public Exception? Error;
+        public Task<string?> GetAsync(CancellationToken cancellationToken = default) => Error is null ? Task.FromResult(Value) : Task.FromException<string?>(Error);
+    }
     private sealed class FakeApi : ITelegramBotApi
     {
         private int concurrent; public int MaxConcurrentPolls; public bool NonCooperativePoll; public TaskCompletionSource PollEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource ReleasePoll { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously); public Queue<IReadOnlyList<TelegramUpdate>> Updates { get; } = new(); public Queue<Exception> Errors { get; } = new();

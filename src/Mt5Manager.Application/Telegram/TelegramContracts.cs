@@ -14,7 +14,8 @@ public sealed record TelegramConnectionState(
     int TerminalCount,
     string? Error);
 
-public sealed record TelegramTerminal(Guid Id, string Name, string? Login, bool IsAvailable, bool? CurrentlyEnabled = null);
+public sealed record TelegramTerminal(Guid Id, string Name, string? Login, bool IsAvailable, bool? CurrentlyEnabled = null,
+    string? Server = null, string? AccountName = null);
 
 public enum TelegramTerminalOutcome { Changed, AlreadyInRequestedState, Failed }
 
@@ -24,7 +25,9 @@ public sealed record TelegramTerminalResult(
     string? Login,
     bool Enable,
     TelegramTerminalOutcome Outcome,
-    string? Error);
+    string? Error,
+    string? Server = null,
+    string? AccountName = null);
 
 public sealed record TelegramButton(string Text, string CallbackData);
 public sealed record TelegramKeyboard(IReadOnlyList<IReadOnlyList<TelegramButton>> Rows);
@@ -56,7 +59,7 @@ public interface ITelegramBotApi
     Task AnswerCallbackAsync(string botToken, string callbackQueryId, string? text = null, CancellationToken cancellationToken = default);
 }
 
-public enum TelegramBotState { Stopped, Running, Unauthorized }
+public enum TelegramBotState { Stopped, Running, Unauthorized, Conflict }
 
 public interface IDelay
 {
@@ -72,7 +75,7 @@ public interface ITelegramBotService : IAsyncDisposable
     Task ApplySettingsAsync(CancellationToken cancellationToken = default);
 }
 
-public enum TelegramBotErrorKind { Unauthorized, RateLimited, Permanent, Transient }
+public enum TelegramBotErrorKind { Unauthorized, Conflict, RateLimited, Permanent, Transient }
 
 public interface ITelegramBotApiError
 {

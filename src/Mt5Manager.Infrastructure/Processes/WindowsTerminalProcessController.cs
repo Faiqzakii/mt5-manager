@@ -92,13 +92,15 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
 
     public async Task<StopResult> StopAsync(TerminalRegistration terminal, TimeSpan timeout, bool force, CancellationToken cancellationToken)
     {
+        if (DataDirectory(terminal) is null)
+            return new StopResult(StopOutcome.Failed, $"Terminal '{terminal.DisplayName}' does not have a verified data directory.");
         EnterOperation();
         try
         {
             await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                var scan = Scan(terminal);
+                var scan = Scan(terminal, destructive: true);
                 try
                 {
                     if (scan.Error is not null) return new StopResult(StopOutcome.Failed, scan.Error);
@@ -133,13 +135,13 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
 
     // Every live process belonging to this terminal record: the one this controller started plus any duplicates
     // launched elsewhere. Processes the controller started are owned by the tracking table; the rest by the scan.
-    private ProcessScan Scan(TerminalRegistration terminal)
+    private ProcessScan Scan(TerminalRegistration terminal, bool destructive = false)
     {
         var matches = new List<Process>();
         var owned = new List<Process>();
         var known = new HashSet<int>();
 
-        if (_processes.TryGetValue(terminal.Id, out var tracked))
+        if (!destructive && _processes.TryGetValue(terminal.Id, out var tracked))
         {
             if (IsRunning(tracked.Process))
             {
@@ -190,7 +192,13 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
 
             if (unresolved > 0)
             {
-                // A single instance launched without /datadir is unambiguous; several cannot be told apart.
+                if (destructive)
+                {
+                    var message = $"The process identity of '{expected}' could not be verified because at least one matching data directory could not be read.";
+                    return new ProcessScan([], owned, message);
+                }
+
+                // Non-destructive discovery may report one executable-only candidate as running.
                 if (candidates.Count == 1) matches.Add(candidates[0]);
                 else
                 {
@@ -322,7 +330,7 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
 
     private void RemoveTracked(Guid registrationId, Process process)
     {
-        if (_processes.TryGetValue(registrationId, out var tracked) && ReferenceEquals(tracked.Process, process))
+        if (_processes.TryGetValue(registrationId, out var tracked) && tracked.Process.Id == process.Id)
             Remove(registrationId, tracked);
     }
 

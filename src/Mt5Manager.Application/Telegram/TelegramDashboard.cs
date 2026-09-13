@@ -7,17 +7,18 @@ public static class TelegramDashboard
     public const int MaxMessageLength = 4096;
     private static readonly TelegramKeyboard EmptyKeyboard = new([]);
 
-    public static TelegramMessage Main(TelegramConnectionState state)
+    public static TelegramMessage Main(TelegramConnectionState state, string? publicIp)
     {
-        var status = state.IsConnected ? "Terhubung" : "Terputus";
+        var status = state.IsConnected ? "🟢 Terhubung" : "🔴 Terputus";
         var bot = string.IsNullOrWhiteSpace(state.BotUsername) ? "-" : $"@{state.BotUsername.TrimStart('@')}";
         var error = string.IsNullOrWhiteSpace(state.Error) ? "" : $"\nKesalahan: {state.Error}";
+        var ip = string.IsNullOrWhiteSpace(publicIp) ? "tidak tersedia" : publicIp;
         return new TelegramMessage(
-            $"🤖 MT5 Manager\nStatus: {status}\nBot: {bot}\nTerminal: {state.TerminalCount}{error}",
+            $"🤖 MT5 Manager\n{status} · {state.TerminalCount} terminal aktif\nBot: {bot}\nIP Publik VPS: {ip}{error}",
             Keyboard(
-                [Button("Status/Refresh", "status")],
-                [Button("ON Terminal", "pick:on"), Button("OFF Terminal", "pick:off")],
-                [Button("ON Semua", "all:on"), Button("OFF Semua", "all:off")]));
+                [Button("✅ ON Terminal", "pick:on"), Button("⛔ OFF Terminal", "pick:off")],
+                [Button("✅ ON Semua", "all:on"), Button("⛔ OFF Semua", "all:off")],
+                [Button("🔄 Refresh", "status")]));
     }
 
     public static TelegramMessage TerminalPicker(bool enable, IReadOnlyList<TelegramTerminal> terminals, string sessionToken)
@@ -27,25 +28,28 @@ public static class TelegramDashboard
         var action = enable ? "mengaktifkan" : "menonaktifkan";
         var operation = enable ? "on" : "off";
         var rows = terminals.Select(terminal => (IReadOnlyList<TelegramButton>)[
-            Button(Label(terminal), Callback($"terminal:{operation}:{terminal.Id:N}:{sessionToken}"))]).ToArray();
-        return new TelegramMessage($"Pilih terminal untuk {action} Algo Trading:", new TelegramKeyboard(rows));
+            Button(ButtonLabel(terminal), Callback($"terminal:{operation}:{terminal.Id:N}:{sessionToken}"))]).ToList();
+        rows.Add([Button("↩️ Kembali", "status")]);
+        var details = terminals.Count == 0 ? "Tidak ada terminal dengan bridge aktif." : string.Join("\n\n", terminals.Select(TerminalDetails));
+        return new TelegramMessage($"📊 Pilih terminal untuk {action} Algo Trading:\n\n{details}", new TelegramKeyboard(rows));
     }
 
     public static TelegramMessage ConfirmTerminal(bool enable, bool currentlyEnabled, TelegramTerminal terminal, string sessionToken)
     {
         ArgumentNullException.ThrowIfNull(terminal);
-        var current = currentlyEnabled ? "ON" : "OFF";
-        var requested = enable ? "ON" : "OFF";
-        return Confirmation($"{Label(terminal)}\nStatus saat ini: {current}\nStatus diminta: {requested}\nLanjutkan?", sessionToken);
+        if (string.IsNullOrWhiteSpace(terminal.Server) && string.IsNullOrWhiteSpace(terminal.AccountName))
+            return Confirmation($"{terminal.Name} — {AvailableLogin(terminal)}\nStatus saat ini: {(currentlyEnabled ? "ON" : "OFF")}\nStatus diminta: {(enable ? "ON" : "OFF")}\n\nGlobal Algo Trading memengaruhi setiap EA di terminal ini.\nLanjutkan?", sessionToken);
+        return Confirmation($"⚠️ Konfirmasi Perubahan\n\n{TerminalIdentity(terminal)}\n🔢 {Login(terminal.Login)}\n\nStatus saat ini: {State(currentlyEnabled)}\nStatus diminta: {State(enable)}\n\nGlobal Algo Trading memengaruhi setiap EA di terminal ini.\nLanjutkan?", sessionToken);
     }
 
     public static TelegramMessage ConfirmAll(bool enable, IReadOnlyList<TelegramTerminal> terminals, string sessionToken)
     {
         ArgumentNullException.ThrowIfNull(terminals);
-        var header = $"{Action(enable)} Algo Trading untuk semua {terminals.Count} terminal?";
+        var header = $"⚠️ {Action(enable)} Algo Trading untuk {terminals.Count} terminal?";
+        var disclosure = "Global Algo Trading memengaruhi setiap EA di setiap terminal yang tercantum.";
         var text = terminals.Count == 0
-            ? header
-            : string.Join("\n", [header, .. terminals.Select(BulkTarget)]);
+            ? $"{header}\n\n{disclosure}"
+            : string.Join("\n", [header, "", .. terminals.Select(BulkTarget), "", disclosure]);
         return Confirmation(text, sessionToken);
     }
 
@@ -110,15 +114,29 @@ public static class TelegramDashboard
     private static string ResultLine(TelegramTerminalResult result)
     {
         var suffix = result.Outcome != TelegramTerminalOutcome.Failed || string.IsNullOrWhiteSpace(result.Error) ? "" : $": {result.Error}";
-        return $"• {result.TerminalName} — {Login(result.Login)}{suffix}";
+        var identity = string.IsNullOrWhiteSpace(result.Server) && string.IsNullOrWhiteSpace(result.AccountName)
+            ? $"{result.TerminalName} — {Login(result.Login)}"
+            : Identity(result.Server, result.Login, result.AccountName, result.TerminalName);
+        return $"• {identity}{suffix}";
     }
 
-    private static string Label(TelegramTerminal terminal) =>
-        $"{terminal.Name} — {(terminal.IsAvailable ? Login(terminal.Login) : "akun tidak tersedia")}";
+    private static string ButtonLabel(TelegramTerminal terminal) =>
+        $"{Value(terminal.Server, terminal.Name)} · {AvailableLogin(terminal)}";
+    private static string TerminalDetails(TelegramTerminal terminal) =>
+        $"{TerminalIdentity(terminal)}\n🔢 {AvailableLogin(terminal)} · {State(terminal.CurrentlyEnabled)}";
+    private static string TerminalIdentity(TelegramTerminal terminal) =>
+        $"🏦 {Value(terminal.Server, terminal.Name)}\n👤 {Value(terminal.AccountName, "Nama akun tidak tersedia")}";
+    private static string Identity(string? server, string? login, string? accountName, string fallbackName) =>
+        $"{Value(server, fallbackName)} · {Login(login)} · {Value(accountName, "Nama akun tidak tersedia")}";
+    private static string Value(string? value, string fallback) => string.IsNullOrWhiteSpace(value) ? fallback : value;
+    private static string AvailableLogin(TelegramTerminal terminal) => terminal.IsAvailable ? Login(terminal.Login) : "akun tidak tersedia";
     private static string Login(string? login) => string.IsNullOrWhiteSpace(login) ? "akun tidak tersedia" : login;
     private static string BulkTarget(TelegramTerminal terminal) =>
-        $"• {Label(terminal)} ({State(terminal.CurrentlyEnabled)})";
-    private static string State(bool? enabled) => enabled is null ? "tidak diketahui" : enabled.Value ? "ON" : "OFF";
+        string.IsNullOrWhiteSpace(terminal.Server) && string.IsNullOrWhiteSpace(terminal.AccountName)
+            ? $"• {terminal.Name} — {AvailableLogin(terminal)} ({LegacyState(terminal.CurrentlyEnabled)})"
+            : $"• {Identity(terminal.Server, terminal.Login, terminal.AccountName, terminal.Name)} · {State(terminal.CurrentlyEnabled)}";
+    private static string State(bool? enabled) => enabled is null ? "⚪ tidak diketahui" : enabled.Value ? "🟢 ON" : "🔴 OFF";
+    private static string LegacyState(bool? enabled) => enabled is null ? "tidak diketahui" : enabled.Value ? "ON" : "OFF";
     private static string Action(bool enable) => enable ? "Aktifkan" : "Nonaktifkan";
     private static TelegramButton Button(string text, string callbackData) => new(text, callbackData);
     private static TelegramKeyboard Keyboard(params IReadOnlyList<TelegramButton>[] rows) => new(rows);

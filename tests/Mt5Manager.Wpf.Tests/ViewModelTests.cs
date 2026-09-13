@@ -143,6 +143,19 @@ public sealed class ViewModelTests
         row.ProcessId.Should().Be(42); row.StorageSummary.Should().Be("Storage not inspected"); row.RestartCommand.CanExecute(null).Should().BeTrue(); row.CanCleanup.Should().BeTrue();
         await row.RestartAsync(); row.LastResult.Should().Contain("restarted");
     }
+    [Fact] public async Task Unverified_row_disables_all_destructive_commands()
+    {
+        var process=new Process { State=new(TerminalState.Running,42,null) }; var row=new TerminalRowViewModel(T(verified:false),process);
+        await row.RefreshStateAsync();
+        row.StopCommand.CanExecute(null).Should().BeFalse(); row.RestartCommand.CanExecute(null).Should().BeFalse(); row.CanCleanup.Should().BeFalse();
+    }
+
+    [Fact] public void Row_exposes_stable_global_algo_impact_warning()
+    {
+        var row=new TerminalRowViewModel(T(),new Process());
+        row.GlobalAlgoTradingWarning.Should().Be("Global Algo Trading affects every EA in this terminal.");
+    }
+
 
     [Fact] public async Task Row_projects_bridge_account_and_algo_permissions()
     {

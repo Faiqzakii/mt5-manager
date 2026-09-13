@@ -28,7 +28,7 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
         var state = await _controller.GetStateAsync(terminal, CancellationToken.None);
 
         launch.WorkingDirectory.Should().Be(Path.GetFullPath(workingDirectory).TrimEnd(Path.DirectorySeparatorChar));
-        launch.Arguments.Should().Equal("argument with spaces", "quoted\"value");
+        launch.Arguments.Should().Equal("argument with spaces", "quoted\"value", $"/datadir:{_root}");
         launch.ProcessId.Should().Be(pid);
         state.Should().Be(new TerminalRuntimeState(TerminalState.Running, pid, null));
     }
@@ -123,6 +123,32 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
 
         result.Should().Be(new StopResult(StopOutcome.ForceTerminated, null));
     }
+    [Fact]
+    public async Task Stop_rejects_unverified_registration_before_process_scan()
+    {
+        var terminal = Registration(_root, Path.Combine(_root, "unverified.json"), "ignore") with { DataDirectoryVerified = false };
+        var controller = new WindowsTerminalProcessController(new ThrowingHandleSource());
+
+        var result = await controller.StopAsync(terminal, TimeSpan.Zero, false, CancellationToken.None);
+
+        result.Outcome.Should().Be(StopOutcome.Failed);
+        result.Error.Should().Contain("verified data directory");
+    }
+
+    [Fact]
+    public async Task Stop_refuses_sole_candidate_when_data_directory_identity_is_unreadable()
+    {
+        var terminal = Registration(_root, Path.Combine(_root, "missing-identity.json"), "ignore");
+        var external = StartExternally(terminal with { Arguments = terminal.Arguments.Where(x => !x.StartsWith("/datadir:", StringComparison.OrdinalIgnoreCase)).ToArray() });
+        await WaitForMainWindowAsync(external.Id);
+
+        var result = await _controller.StopAsync(terminal, TimeSpan.FromMilliseconds(200), false, CancellationToken.None);
+
+        result.Outcome.Should().Be(StopOutcome.Failed);
+        result.Error.Should().Contain("data directory");
+        external.HasExited.Should().BeFalse();
+    }
+
 
     [Fact]
     public async Task Start_rejects_duplicate_registered_launch()
@@ -390,7 +416,7 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
     }
 
     private TerminalRegistration Registration(string workingDirectory, params string[] arguments) =>
-        new(Guid.NewGuid(), "Fixture", FixturePath, _root, workingDirectory, arguments, DiscoverySource.Manual, true);
+        new(Guid.NewGuid(), "Fixture", FixturePath, _root, workingDirectory, [.. arguments, $"/datadir:{_root}"], DiscoverySource.Manual, true);
 
     private TerminalRegistration RegistrationWithData(string dataDirectory, string workingDirectory, params string[] arguments) =>
         new(Guid.NewGuid(), "Fixture", FixturePath, dataDirectory, workingDirectory, arguments, DiscoverySource.Manual, true);
@@ -469,8 +495,18 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
 
     private static async Task<LaunchRecord> ReadLaunchAsync(string path)
     {
-        for (var attempt = 0; attempt < 100 && !File.Exists(path); attempt++) await Task.Delay(25);
-        return JsonSerializer.Deserialize<LaunchRecord>(await File.ReadAllTextAsync(path))!;
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                return JsonSerializer.Deserialize<LaunchRecord>(stream)!;
+            }
+            catch (Exception exception) when (attempt < 100 && exception is IOException or JsonException or FileNotFoundException)
+            {
+                await Task.Delay(25);
+            }
+        }
     }
 
     private static string FindRepositoryRoot()
@@ -481,6 +517,12 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
     }
 
     private sealed record LaunchRecord(string[] Arguments, string WorkingDirectory, int ProcessId);
+
+    private sealed class ThrowingHandleSource : IProcessHandleSource
+    {
+        public nint Open(int processId) => throw new InvalidOperationException("Process scan must not run.");
+        public void Close(nint handle) => throw new InvalidOperationException("Process scan must not run.");
+    }
 
     private sealed class OpaqueHandleSource(int opaqueProcessId) : IProcessHandleSource
     {
