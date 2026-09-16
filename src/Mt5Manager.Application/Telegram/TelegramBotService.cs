@@ -213,7 +213,14 @@ public sealed class TelegramBotService : ITelegramBotService
     }
     private async Task BeginAllAsync(long chatId, long messageId, bool enable, bool edit, CancellationToken ct)
     {
-        var terminals = await LoadTerminalsAsync(ct).ConfigureAwait(false);
+        var terminals = (await LoadTerminalsAsync(ct).ConfigureAwait(false))
+            .Where(terminal => terminal.CurrentlyEnabled == !enable)
+            .ToArray();
+        if (terminals.Length == 0)
+        {
+            await DeliverAsync(chatId, messageId, TelegramDashboard.NoBulkTargets(enable), edit, ct).ConfigureAwait(false);
+            return;
+        }
         var key = Store(chatId, edit ? messageId : 0, enable, terminals.Select(x => x.Id).ToArray());
         BindMessage(key, await DeliverAsync(chatId, messageId, TelegramDashboard.ConfirmAll(enable, terminals, key), edit, ct).ConfigureAwait(false));
     }

@@ -24,6 +24,17 @@ public interface IAlgoTradingInput
     AlgoTradingInputFailure TryAcquire(nint window, out IAlgoTradingLease? lease);
 }
 
+internal interface IAlgoTradingNativeApi
+{
+    nint GetForegroundWindow();
+    uint GetWindowThreadProcessId(nint window);
+    uint GetCurrentThreadId();
+    bool PostMessage(nint window, int message, nint wParam, nint lParam);
+    bool AttachThreadInput(uint threadId, uint attachThreadId, bool attach);
+    bool SetForegroundWindow(nint window);
+    bool SendInput(WindowsTerminalAlgoTradingController.NativeInput[] inputs);
+}
+
 public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingController
 {
     private const int WmSyscommand = 0x0112;
@@ -134,77 +145,111 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
         return windows;
     }
 
-    private sealed class Win32AlgoTradingInput : IAlgoTradingInput
+    internal sealed class Win32AlgoTradingInput : IAlgoTradingInput
     {
+        private const int ForegroundAttempts = 3;
+        private static readonly TimeSpan ForegroundRetryDelay = TimeSpan.FromMilliseconds(25);
+        private readonly IAlgoTradingNativeApi native;
+        private readonly Action<TimeSpan> delay;
+
+        public Win32AlgoTradingInput() : this(new Win32NativeApi(), Thread.Sleep) { }
+
+        internal Win32AlgoTradingInput(IAlgoTradingNativeApi native, Action<TimeSpan>? delay = null)
+        {
+            this.native = native;
+            this.delay = delay ?? Thread.Sleep;
+        }
+
         public AlgoTradingInputFailure TryAcquire(nint window, out IAlgoTradingLease? lease)
         {
             lease = null;
-            var foreground = GetForegroundWindow();
-            if (!PostMessage(window, WmSyscommand, ScRestore, 0)) return AlgoTradingInputFailure.WindowRestore;
+            var foreground = native.GetForegroundWindow();
+            if (!native.PostMessage(window, WmSyscommand, ScRestore, 0)) return AlgoTradingInputFailure.WindowRestore;
 
-            var targetThread = GetWindowThreadProcessId(window, 0);
-            var currentThread = GetCurrentThreadId();
-            var foregroundThread = foreground == nint.Zero ? 0 : GetWindowThreadProcessId(foreground, 0);
+            var targetThread = native.GetWindowThreadProcessId(window);
+            var currentThread = native.GetCurrentThreadId();
+            var foregroundThread = foreground == nint.Zero ? 0 : native.GetWindowThreadProcessId(foreground);
             var attachedThreads = new List<uint>(2);
             foreach (var thread in RequiredInputAttachments(currentThread, targetThread, foregroundThread))
             {
-                if (AttachThreadInput(currentThread, thread, true))
+                if (native.AttachThreadInput(currentThread, thread, true))
                 {
                     attachedThreads.Add(thread);
                     continue;
                 }
 
-                DetachInputThreads(currentThread, attachedThreads);
-                RestoreForeground(foreground);
+                CleanupFailure(foreground, currentThread, attachedThreads);
                 return AlgoTradingInputFailure.ThreadAttachment;
             }
 
-            if (window != GetForegroundWindow() && !SetForegroundWindow(window))
+            for (var attempt = 0; attempt < ForegroundAttempts && native.GetForegroundWindow() != window; attempt++)
             {
-                DetachInputThreads(currentThread, attachedThreads);
-                RestoreForeground(foreground);
+                native.SetForegroundWindow(window);
+                if (native.GetForegroundWindow() != window && attempt + 1 < ForegroundAttempts) delay(ForegroundRetryDelay);
+            }
+
+            if (native.GetForegroundWindow() != window)
+            {
+                CleanupFailure(foreground, currentThread, attachedThreads);
                 return AlgoTradingInputFailure.ForegroundActivation;
             }
 
-            if (!SendInput([KeyDown(VkControl), KeyDown(VkE), KeyUp(VkE), KeyUp(VkControl)]))
+            if (!native.SendInput([KeyDown(VkControl), KeyDown(VkE), KeyUp(VkE), KeyUp(VkControl)]))
             {
-                DetachInputThreads(currentThread, attachedThreads);
-                RestoreForeground(foreground);
+                CleanupFailure(foreground, currentThread, attachedThreads);
                 return AlgoTradingInputFailure.InputInjection;
             }
 
-            lease = new ForegroundLease(window, foreground, currentThread, attachedThreads);
+            lease = new ForegroundLease(native, window, foreground, currentThread, attachedThreads);
             return AlgoTradingInputFailure.None;
         }
 
-        private static void DetachInputThreads(uint currentThread, IReadOnlyList<uint> attachedThreads)
+        private void CleanupFailure(nint foreground, uint currentThread, IReadOnlyList<uint> attachedThreads)
+        {
+            DetachInputThreads(currentThread, attachedThreads);
+            RestoreForeground(foreground);
+        }
+
+        private void DetachInputThreads(uint currentThread, IReadOnlyList<uint> attachedThreads)
         {
             for (var index = attachedThreads.Count - 1; index >= 0; index--)
-                AttachThreadInput(currentThread, attachedThreads[index], false);
+                native.AttachThreadInput(currentThread, attachedThreads[index], false);
         }
 
-        private static void RestoreForeground(nint foreground)
+        private void RestoreForeground(nint foreground)
         {
-            if (foreground != nint.Zero) SetForegroundWindow(foreground);
+            if (foreground != nint.Zero) native.SetForegroundWindow(foreground);
         }
 
-        private sealed class ForegroundLease(nint window, nint foreground, uint currentThread, IReadOnlyList<uint> attachedThreads) : IAlgoTradingLease
+        private sealed class ForegroundLease(IAlgoTradingNativeApi native, nint window, nint foreground, uint currentThread, IReadOnlyList<uint> attachedThreads) : IAlgoTradingLease
         {
             private bool disposed;
 
-            public bool TryMinimize() => !disposed && PostMessage(window, WmSyscommand, ScMinimize, 0);
+            public bool TryMinimize() => !disposed && native.PostMessage(window, WmSyscommand, ScMinimize, 0);
 
             public void Dispose()
             {
                 if (disposed) return;
                 disposed = true;
-                DetachInputThreads(currentThread, attachedThreads);
-                RestoreForeground(foreground);
+                for (var index = attachedThreads.Count - 1; index >= 0; index--)
+                    native.AttachThreadInput(currentThread, attachedThreads[index], false);
+                if (foreground != nint.Zero) native.SetForegroundWindow(foreground);
             }
         }
 
         private static NativeInput KeyDown(ushort virtualKey) => new() { Type = KeyEvent, Keyboard = new NativeKeyboardInput { VirtualKey = virtualKey, Flags = 0 } };
         private static NativeInput KeyUp(ushort virtualKey) => new() { Type = KeyEvent, Keyboard = new NativeKeyboardInput { VirtualKey = virtualKey, Flags = KeyEventUp } };
+    }
+
+    private sealed class Win32NativeApi : IAlgoTradingNativeApi
+    {
+        public nint GetForegroundWindow() => WindowsTerminalAlgoTradingController.GetForegroundWindow();
+        public uint GetWindowThreadProcessId(nint window) => WindowsTerminalAlgoTradingController.GetWindowThreadProcessId(window, 0);
+        public uint GetCurrentThreadId() => WindowsTerminalAlgoTradingController.GetCurrentThreadId();
+        public bool PostMessage(nint window, int message, nint wParam, nint lParam) => WindowsTerminalAlgoTradingController.PostMessage(window, message, wParam, lParam);
+        public bool AttachThreadInput(uint threadId, uint attachThreadId, bool attach) => WindowsTerminalAlgoTradingController.AttachThreadInput(threadId, attachThreadId, attach);
+        public bool SetForegroundWindow(nint window) => WindowsTerminalAlgoTradingController.SetForegroundWindow(window);
+        public bool SendInput(NativeInput[] inputs) => WindowsTerminalAlgoTradingController.SendInput(inputs);
     }
 
     [StructLayout(LayoutKind.Sequential)]

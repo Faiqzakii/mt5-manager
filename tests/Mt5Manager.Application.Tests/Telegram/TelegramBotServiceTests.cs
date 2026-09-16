@@ -104,7 +104,14 @@ public sealed class TelegramBotServiceTests
     public async Task Mutation_commands_route_to_inline_confirmation_flows(string command, string callbackPrefix)
     {
         await using var f = new Fixture();
-        var terminal = f.Registration(); f.Registry.Items.Add(terminal); f.Runtime.Snapshots[terminal.Id] = f.Snapshot();
+        var terminal = f.Registration();
+        f.Registry.Items.Add(terminal);
+        f.Runtime.Snapshots[terminal.Id] = f.Snapshot() with
+        {
+            GlobalAlgoTrading = command.Contains("off", StringComparison.Ordinal)
+                ? AlgoTradingState.Enabled
+                : AlgoTradingState.Disabled
+        };
         f.Api.Updates.Enqueue([new(0, new(42, 8, command), null)]);
         await f.RunAsync(1);
         f.Api.Sent.Should().ContainSingle();
@@ -295,7 +302,7 @@ public sealed class TelegramBotServiceTests
     }
 
     [Fact]
-    public async Task Bulk_confirmation_lists_current_targets_and_refreshes_dashboard_after_execution()
+    public async Task Bulk_confirmation_includes_only_terminals_in_the_opposite_state()
     {
         await using var f = new Fixture();
         var alpha = f.AvailableTerminal("Alpha");
@@ -304,14 +311,31 @@ public sealed class TelegramBotServiceTests
         f.Runtime.Snapshots[bravo.Id] = f.Snapshot() with { Login = 654321 };
         var confirmation = await f.CreateConfirmationAsync("/on_all");
 
-        f.Api.LastDelivered.Text.Should().Contain("Server · 123456 · Name · 🟢 ON");
+        f.Api.LastDelivered.Text.Should().NotContain("Server · 123456 · Name · 🟢 ON");
         f.Api.LastDelivered.Text.Should().Contain("Server · 654321 · Name · 🔴 OFF");
+        f.Api.LastDelivered.Text.Should().Contain("untuk 1 terminal");
         f.Api.Sent.Clear(); f.Api.Edits.Clear();
         await f.SendCallbacksAsync(new TelegramCallbackQuery("go", 42, 9, confirmation));
 
+        f.Algo.Requests.Should().ContainSingle().Which.TerminalId.Should().Be(bravo.Id);
         f.Api.Edits.Should().Contain(message => message.Text.Contains("sedang diproses"));
         f.Api.Sent.Should().Contain(message => message.Message.Text.Contains("Berhasil"));
         f.Api.Sent.Last().Message.Text.Should().Contain("🟢 Terhubung");
+    }
+
+    [Fact]
+    public async Task Bulk_action_without_opposite_state_targets_does_not_offer_confirmation()
+    {
+        await using var f = new Fixture();
+        var terminal = f.AvailableTerminal();
+        f.Runtime.Snapshots[terminal.Id] = f.Snapshot() with { GlobalAlgoTrading = AlgoTradingState.Enabled };
+
+        f.Api.Updates.Enqueue([new(0, new(42, 1, "/on_all"), null)]);
+        await f.RunAsync(1);
+
+        f.Api.LastDelivered.Text.Should().Be("Semua terminal yang tersedia sudah ON.");
+        f.Api.LastDelivered.Keyboard.Rows.Should().BeEmpty();
+        f.Algo.Requests.Should().BeEmpty();
     }
 
     [Fact]

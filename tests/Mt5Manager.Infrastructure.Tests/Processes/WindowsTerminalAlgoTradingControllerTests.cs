@@ -30,6 +30,40 @@ public sealed class WindowsTerminalAlgoTradingControllerTests
     }
 
     [Fact]
+    public void Native_input_retries_until_target_is_confirmed_foreground()
+    {
+        var native = new FakeNativeApi([10, 10, 10, 42, 42], [false]);
+        var delays = new List<TimeSpan>();
+        var input = new WindowsTerminalAlgoTradingController.Win32AlgoTradingInput(native, delays.Add);
+
+        var failure = input.TryAcquire(42, out var lease);
+
+        failure.Should().Be(AlgoTradingInputFailure.None);
+        lease.Should().NotBeNull();
+        native.ForegroundRequests.Should().Equal([42]);
+        native.SetResultsUsed.Should().Equal([false], "a rejected activation request may still be followed by delayed focus acquisition");
+        delays.Should().HaveCount(1);
+        native.InputForegrounds.Should().Equal([42], "the target must be rechecked immediately before input injection");
+        lease!.Dispose();
+    }
+
+    [Fact]
+    public void Failed_foreground_acquisition_cleans_up_and_does_not_poison_the_next_request()
+    {
+        var native = new FakeNativeApi([10, 10, 10, 10, 10, 10, 10, 10, 42, 42, 42]);
+        var input = new WindowsTerminalAlgoTradingController.Win32AlgoTradingInput(native, _ => { });
+
+        input.TryAcquire(42, out var failedLease).Should().Be(AlgoTradingInputFailure.ForegroundActivation);
+        failedLease.Should().BeNull();
+        native.Attachments.Should().ContainInOrder((1u, 2u, true), (1u, 3u, true), (1u, 3u, false), (1u, 2u, false));
+        native.ForegroundRequests.Should().EndWith(10, "the original foreground must be restored on failure");
+
+        input.TryAcquire(42, out var succeedingLease).Should().Be(AlgoTradingInputFailure.None);
+        native.InputForegrounds.Should().Equal([42]);
+        succeedingLease!.Dispose();
+    }
+
+    [Fact]
     public async Task Set_is_no_op_when_desired_state_is_already_current()
     {
         var input = new FakeInput();
@@ -170,6 +204,48 @@ public sealed class WindowsTerminalAlgoTradingControllerTests
         }
 
         public void Dispose() => onDispose();
+    }
+
+    private sealed class FakeNativeApi(IEnumerable<nint> foregroundValues, IEnumerable<bool>? setResults = null) : IAlgoTradingNativeApi
+    {
+        private readonly Queue<nint> foregrounds = new(foregroundValues);
+        private readonly Queue<bool> setResults = new(setResults ?? []);
+        private nint foreground = foregroundValues.FirstOrDefault();
+
+        public List<nint> ForegroundRequests { get; } = [];
+        public List<(uint Current, uint Other, bool Attach)> Attachments { get; } = [];
+        public List<nint> InputForegrounds { get; } = [];
+        public List<bool> SetResultsUsed { get; } = [];
+
+        public nint GetForegroundWindow()
+        {
+            if (foregrounds.Count > 0) foreground = foregrounds.Dequeue();
+            return foreground;
+        }
+
+        public uint GetWindowThreadProcessId(nint window) => window == 42 ? 2u : 3u;
+        public uint GetCurrentThreadId() => 1;
+        public bool PostMessage(nint window, int message, nint wParam, nint lParam) => true;
+
+        public bool AttachThreadInput(uint threadId, uint attachThreadId, bool attach)
+        {
+            Attachments.Add((threadId, attachThreadId, attach));
+            return true;
+        }
+
+        public bool SetForegroundWindow(nint window)
+        {
+            ForegroundRequests.Add(window);
+            var result = setResults.Count == 0 || setResults.Dequeue();
+            SetResultsUsed.Add(result);
+            return result;
+        }
+
+        public bool SendInput(WindowsTerminalAlgoTradingController.NativeInput[] inputs)
+        {
+            InputForegrounds.Add(foreground);
+            return true;
+        }
     }
 
     private sealed class FakeProcess(TerminalRuntimeState state) : ITerminalProcessController

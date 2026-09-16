@@ -16,12 +16,18 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
     private readonly ConcurrentDictionary<Guid, TrackedProcess> _processes = new();
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly IProcessHandleSource _handles;
+    private readonly IMt5DataDirectoryResolver _dataDirectoryResolver;
     private readonly object _lifetimeLock = new();
     private bool _disposed;
     private int _activeOperations;
 
-    public WindowsTerminalProcessController(IProcessHandleSource? handles = null) =>
+    public WindowsTerminalProcessController(
+        IProcessHandleSource? handles = null,
+        IMt5DataDirectoryResolver? dataDirectoryResolver = null)
+    {
         _handles = handles ?? new LimitedRightsProcessHandleSource();
+        _dataDirectoryResolver = dataDirectoryResolver ?? new Mt5DataDirectoryResolver();
+    }
 
     public async Task<TerminalRuntimeState> GetStateAsync(TerminalRegistration terminal, CancellationToken cancellationToken)
     {
@@ -185,7 +191,7 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
             var unresolved = 0;
             foreach (var candidate in candidates)
             {
-                var candidateData = ReadDataDirectory(candidate.Id);
+                var candidateData = ReadDataDirectory(candidate.Id, terminal, expected);
                 if (candidateData is null) { unresolved++; continue; }
                 if (StringComparer.OrdinalIgnoreCase.Equals(candidateData, dataDirectory)) matches.Add(candidate);
             }
@@ -221,7 +227,7 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
         finally { _handles.Close(handle); }
     }
 
-    private string? ReadDataDirectory(int processId)
+    private string? ReadDataDirectory(int processId, TerminalRegistration terminal, string executablePath)
     {
         var handle = _handles.Open(processId);
         if (handle == nint.Zero) return null;
@@ -229,8 +235,18 @@ public sealed class WindowsTerminalProcessController : ITerminalProcessControlle
         {
             var commandLine = WindowsProcessQuery.ReadCommandLine(handle);
             if (commandLine is null) return null;
-            var data = WindowsProcessQuery.FindDataDirectory(commandLine);
-            return data is null ? null : WindowsProcessQuery.CanonicalPath(data);
+            var arguments = WindowsProcessQuery.Split(commandLine);
+            if (arguments.Count > 0) arguments.RemoveAt(0);
+            var explicitData = WindowsProcessQuery.FindDataDirectory(arguments);
+            if (explicitData is not null) return WindowsProcessQuery.CanonicalPath(explicitData);
+
+            return _dataDirectoryResolver.Resolve(terminal with
+            {
+                ExecutablePath = executablePath,
+                DataDirectory = string.Empty,
+                Arguments = arguments,
+                DataDirectoryVerified = false
+            });
         }
         catch (Win32Exception) { return null; }
         finally { _handles.Close(handle); }

@@ -136,6 +136,51 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Stop_resolves_default_data_directory_when_command_line_has_no_datadir()
+    {
+        var install = CopyFixtureInstall("default-install");
+        var appData = Directory.CreateDirectory(Path.Combine(_root, "app-data")).FullName;
+        var candidate = Directory.CreateDirectory(Path.Combine(appData, "installation-hash")).FullName;
+        CreateMt5Structure(candidate);
+        File.WriteAllText(Path.Combine(candidate, "origin.txt"), install);
+        var terminal = new TerminalRegistration(Guid.NewGuid(), "Fixture", Path.Combine(install, Path.GetFileName(FixturePath)),
+            candidate, install, [Path.Combine(_root, "default-data.json"), "exit"], DiscoverySource.Manual, true);
+        var external = StartExternally(terminal);
+        await WaitForMainWindowAsync(external.Id);
+        using var controller = new WindowsTerminalProcessController(dataDirectoryResolver: new Mt5DataDirectoryResolver(appData));
+
+        var result = await controller.StopAsync(terminal, TimeSpan.FromSeconds(5), false, CancellationToken.None);
+
+        result.Should().Be(new StopResult(StopOutcome.ExitedGracefully, null));
+        external.HasExited.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Stop_refuses_process_when_default_data_directory_is_ambiguous()
+    {
+        var install = CopyFixtureInstall("ambiguous-install");
+        var appData = Directory.CreateDirectory(Path.Combine(_root, "ambiguous-app-data")).FullName;
+        foreach (var name in new[] { "first", "second" })
+        {
+            var candidate = Directory.CreateDirectory(Path.Combine(appData, name)).FullName;
+            CreateMt5Structure(candidate);
+            File.WriteAllText(Path.Combine(candidate, "origin.txt"), install);
+        }
+        var registeredData = Path.Combine(appData, "first");
+        var terminal = new TerminalRegistration(Guid.NewGuid(), "Fixture", Path.Combine(install, Path.GetFileName(FixturePath)),
+            registeredData, install, [Path.Combine(_root, "ambiguous-data.json"), "ignore"], DiscoverySource.Manual, true);
+        var external = StartExternally(terminal);
+        await WaitForMainWindowAsync(external.Id);
+        using var controller = new WindowsTerminalProcessController(dataDirectoryResolver: new Mt5DataDirectoryResolver(appData));
+
+        var result = await controller.StopAsync(terminal, TimeSpan.FromMilliseconds(200), false, CancellationToken.None);
+
+        result.Outcome.Should().Be(StopOutcome.Failed);
+        result.Error.Should().Contain("data directory");
+        external.HasExited.Should().BeFalse();
+    }
+
+    [Fact]
     public async Task Stop_refuses_sole_candidate_when_data_directory_identity_is_unreadable()
     {
         var terminal = Registration(_root, Path.Combine(_root, "missing-identity.json"), "ignore");
@@ -422,6 +467,12 @@ public sealed class WindowsTerminalProcessControllerTests : IAsyncLifetime
         new(Guid.NewGuid(), "Fixture", FixturePath, dataDirectory, workingDirectory, arguments, DiscoverySource.Manual, true);
 
     private string DataDirectory(string name) => Directory.CreateDirectory(Path.Combine(_root, name)).FullName;
+    private static void CreateMt5Structure(string directory)
+    {
+        Directory.CreateDirectory(Path.Combine(directory, "config"));
+        Directory.CreateDirectory(Path.Combine(directory, "bases"));
+        Directory.CreateDirectory(Path.Combine(directory, "logs"));
+    }
 
     // Both instances of one record must share the data directory to count as duplicates, but they
     // cannot write the same launch record concurrently.

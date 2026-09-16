@@ -52,6 +52,11 @@ public static class TelegramDashboard
             : string.Join("\n", [header, "", .. terminals.Select(BulkTarget), "", disclosure]);
         return Confirmation(text, sessionToken);
     }
+    public static TelegramMessage NoBulkTargets(bool enable) =>
+        new(enable
+            ? "Semua terminal yang tersedia sudah ON."
+            : "Semua terminal yang tersedia sudah OFF.", EmptyKeyboard);
+
 
     public static TelegramMessage Processing(bool enable, int terminalCount) =>
         new($"{Action(enable)} Algo Trading untuk {terminalCount} terminal sedang diproses…", EmptyKeyboard);
