@@ -72,9 +72,9 @@ The WPF composition root registers these services. Application startup starts po
 
 ## Serialization and state consistency
 
-All UI and Telegram mutations pass through the shared application service and one process-wide operation queue. Operations execute serially because MT5 control acquires foreground focus and sends Ctrl+E. Bulk operations capture the ordered set of registered terminal identifiers at confirmation time and enqueue/process them sequentially.
+All UI and Telegram mutations pass through the shared application service and one process-wide operation queue. Operations execute serially so that at most one Algo Trading toggle per terminal is in flight; the controller detects the current state and posts at most one toggle command per request. Bulk operations capture the ordered set of registered terminal identifiers at confirmation time and enqueue/process them sequentially.
 
-The controller re-reads the bridge immediately before acting. If the requested state is already observed, it returns an idempotent Already ON/OFF result and does not send Ctrl+E. Success is reported only after the bridge verifies the desired `TERMINAL_TRADE_ALLOWED` state.
+The controller re-reads the bridge immediately before acting. If the requested state is already observed, it returns an idempotent Already ON/OFF result and posts no command. Success is reported only after the bridge verifies the desired `TERMINAL_TRADE_ALLOWED` state.
 
 Status refresh may read snapshots while mutations are queued or active, but it cannot initiate another mutation. Dashboard text is refreshed after an operation. If editing the existing Telegram message fails because it is missing or no longer editable, the bot sends a new dashboard and treats it as current.
 
@@ -86,7 +86,7 @@ Every attempted target operation creates an audit record through the shared appl
 
 Telegram timeouts and transient transport failures retry with bounded exponential backoff. HTTP 429 honors `retry_after`; HTTP 5xx retries. HTTP 401 stops polling and exposes an invalid-token state instead of retrying indefinitely.
 
-MT5 offline state, stale or missing bridge snapshots, unknown account data, ambiguous windows, focus/input failure, and verification timeout fail only the affected terminal. Bulk execution continues and reports partial results.
+MT5 offline state, stale or missing bridge snapshots, unknown account data, ambiguous windows, a failed command post, and verification timeout fail only the affected terminal. Bulk execution continues and reports partial results.
 
 Telegram callback queries are acknowledged promptly before potentially long MT5 work, and the dashboard shows an in-progress state. Telegram message output is split at terminal-result boundaries when it would exceed API limits; result content is never silently truncated.
 
@@ -98,7 +98,7 @@ Permanent tests cover externally observable risk boundaries:
 
 - a non-matching Chat ID receives no response and cannot execute a callback;
 - expired, duplicate, and malformed confirmation tokens perform no operation;
-- desired-state idempotency does not send Ctrl+E;
+- desired-state idempotency posts no command;
 - UI and Telegram mutations share serial execution;
 - bulk execution continues after a target failure and reports per-target outcomes;
 - persisted update offsets prevent acknowledged update replay;

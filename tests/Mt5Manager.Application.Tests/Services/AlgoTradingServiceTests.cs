@@ -11,12 +11,11 @@ public sealed class AlgoTradingServiceTests
     public async Task Queued_request_reloads_registry_inside_gate_and_resolves_updated_terminal_by_id()
     {
         var blockingId = Guid.NewGuid();
-        var requestedId = Guid.NewGuid();
+        var requestedId = blockingId;
         var otherId = Guid.NewGuid();
         var original = Registration(requestedId, "Original name");
         var updated = Registration(requestedId, "Updated name");
         var registry = new Registry(
-            Registration(blockingId, "Blocking"),
             Registration(otherId, "Other"),
             original);
         var controller = new BlockingController();
@@ -71,33 +70,72 @@ public sealed class AlgoTradingServiceTests
     }
 
     [Fact]
-    public async Task Different_service_instances_serialize_controller_calls_process_wide()
+    public async Task Different_terminals_do_not_share_a_gate()
     {
         var firstId = Guid.NewGuid();
         var secondId = Guid.NewGuid();
         var controller = new BlockingController();
-        var first = Service(new Registry(Registration(firstId, "First")), controller, new Audit());
-        var second = Service(new Registry(Registration(secondId, "Second")), controller, new Audit());
+        var first = Service(new Registry(Registration(firstId, "First"), Registration(secondId, "Second")), controller, new Audit());
+        var second = Service(new Registry(Registration(firstId, "First"), Registration(secondId, "Second")), controller, new Audit());
+
         var firstCall = first.SetAsync(new(firstId, true, AlgoOperationSource.Wpf));
-        Task<AlgoTradingOperationResult>? secondCall = null;
+        var secondCall = second.SetAsync(new(secondId, false, AlgoOperationSource.Telegram));
+        await controller.WaitForEntryAsync(2);
 
-        try
-        {
-            await controller.WaitForEntryAsync();
-            secondCall = second.SetAsync(new(secondId, false, AlgoOperationSource.Telegram));
-            await Task.Delay(100);
-            controller.EntryCount.Should().Be(1);
-        }
-        finally
-        {
-            controller.Release();
-            if (secondCall is not null)
-                await Task.WhenAll(firstCall, secondCall).WaitAsync(TimeSpan.FromSeconds(5));
-            else
-                await firstCall.WaitAsync(TimeSpan.FromSeconds(5));
-        }
+        controller.MaxConcurrent.Should().Be(2);
+        controller.Release();
+        await Task.WhenAll(firstCall, secondCall).WaitAsync(TimeSpan.FromSeconds(5));
+    }
 
+    [Fact]
+    public async Task Same_terminal_serializes_across_service_instances()
+    {
+        var id = Guid.NewGuid();
+        var controller = new BlockingController();
+        var first = Service(new Registry(Registration(id, "Terminal")), controller, new Audit());
+        var second = Service(new Registry(Registration(id, "Terminal")), controller, new Audit());
+        var firstCall = first.SetAsync(new(id, true, AlgoOperationSource.Wpf));
+        await controller.WaitForEntryAsync();
+        var secondCall = second.SetAsync(new(id, false, AlgoOperationSource.Telegram));
+        await Task.Delay(100);
+
+        controller.EntryCount.Should().Be(1);
+        controller.Release();
+        await Task.WhenAll(firstCall, secondCall).WaitAsync(TimeSpan.FromSeconds(5));
         controller.MaxConcurrent.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Completed_operations_remove_per_terminal_gates_after_churn()
+    {
+        var ids = Enumerable.Range(0, 200).Select(_ => Guid.NewGuid()).ToArray();
+        var registry = new Registry(ids.Select(id => Registration(id, id.ToString())).ToArray());
+        var service = Service(registry, new Controller(new(true, "done", null)), new Audit());
+
+        await Task.WhenAll(ids.Select(id => service.SetAsync(new(id, true, AlgoOperationSource.Wpf))));
+
+        AlgoTradingService.OperationGateCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Cancelled_waiter_releases_lease_without_breaking_current_holder()
+    {
+        var id = Guid.NewGuid();
+        var controller = new BlockingController();
+        var service = Service(new Registry(Registration(id, "Terminal")), controller, new Audit());
+        var holder = service.SetAsync(new(id, true, AlgoOperationSource.Wpf));
+        await controller.WaitForEntryAsync();
+        using var cancellation = new CancellationTokenSource();
+        var waiter = service.SetAsync(new(id, false, AlgoOperationSource.Telegram), cancellation.Token);
+
+        cancellation.Cancel();
+        await FluentActions.Awaiting(() => waiter).Should().ThrowAsync<OperationCanceledException>();
+        AlgoTradingService.OperationGateCount.Should().Be(1);
+
+        controller.Release();
+        await holder.WaitAsync(TimeSpan.FromSeconds(5));
+        AlgoTradingService.OperationGateCount.Should().Be(0);
+        controller.EntryCount.Should().Be(1);
     }
 
     [Fact]
@@ -135,16 +173,17 @@ public sealed class AlgoTradingServiceTests
     }
 
     [Fact]
-    public async Task Audit_append_failure_after_controller_result_is_not_retried_as_rejection()
+    public async Task Audit_append_failure_after_controller_success_preserves_success_result()
     {
         var id = Guid.NewGuid();
         var audit = new Audit { Exception = new IOException("audit unavailable") };
         var service = Service(new Registry(Registration(id, "Broker")),
             new Controller(new(true, "done", null)), audit);
 
-        var act = () => service.SetAsync(new(id, true, AlgoOperationSource.Wpf));
+        var result = await service.SetAsync(new(id, true, AlgoOperationSource.Wpf));
 
-        await act.Should().ThrowAsync<IOException>().WithMessage("audit unavailable");
+        result.Result.Success.Should().BeTrue();
+        result.Result.Message.Should().Be("done");
         audit.Attempts.Should().Be(1);
     }
 
@@ -213,7 +252,12 @@ public sealed class AlgoTradingServiceTests
             Interlocked.Decrement(ref concurrent);
             return new(true, "done", null);
         }
-        public Task WaitForEntryAsync() => entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        public Task WaitForEntryAsync(int count = 1) => WaitUntilAsync(() => Volatile.Read(ref EntryCount) >= count);
+        private static async Task WaitUntilAsync(Func<bool> condition)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            while (!condition()) await Task.Delay(10, timeout.Token);
+        }
         public void Release() => release.TrySetResult();
     }
 

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Mt5Manager.Application.Abstractions;
@@ -13,6 +14,7 @@ public sealed class JsonTerminalRegistry : ITerminalRegistry
         WriteIndented = true,
         Converters = { new JsonStringEnumConverter() }
     };
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> PathGates = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly string _path;
 
@@ -22,59 +24,57 @@ public sealed class JsonTerminalRegistry : ITerminalRegistry
 
     public async Task<IReadOnlyList<TerminalRegistration>> LoadAsync(CancellationToken cancellationToken = default)
     {
-        if (!File.Exists(_path)) return [];
-
+        var gate = GetGate();
+        await gate.WaitAsync(cancellationToken);
         try
         {
-            await using var stream = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
-            var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object ||
-                !root.TryGetProperty("version", out var version) ||
-                version.ValueKind != JsonValueKind.Number ||
-                !version.TryGetInt32(out var documentVersion) ||
-                documentVersion != CurrentVersion ||
-                !root.TryGetProperty("terminals", out var terminals) ||
-                terminals.ValueKind != JsonValueKind.Array)
+            await using var processLock = await InterprocessFileLock.AcquireAsync(_path, cancellationToken);
+            byte[] content;
+            try { content = await File.ReadAllBytesAsync(_path, cancellationToken); }
+            catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException) { return []; }
+
+            try
             {
-                PreserveUnreadableFile();
+                using var document = JsonDocument.Parse(content);
+                var root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Object ||
+                    !root.TryGetProperty("version", out var version) ||
+                    version.ValueKind != JsonValueKind.Number ||
+                    !version.TryGetInt32(out var documentVersion) ||
+                    documentVersion != CurrentVersion ||
+                    !root.TryGetProperty("terminals", out var terminals) ||
+                    terminals.ValueKind != JsonValueKind.Array)
+                {
+                    await PreserveUnreadableFileAsync(content, cancellationToken);
+                    return [];
+                }
+
+                var valid = new List<TerminalRegistration>();
+                foreach (var element in terminals.EnumerateArray())
+                {
+                    try
+                    {
+                        var registration = element.Deserialize<TerminalRegistration>(Options);
+                        if (IsValid(registration)) valid.Add(registration!);
+                    }
+                    catch (JsonException) { }
+                }
+                return valid;
+            }
+            catch (JsonException)
+            {
+                await PreserveUnreadableFileAsync(content, cancellationToken);
                 return [];
             }
-
-            var valid = new List<TerminalRegistration>();
-            foreach (var element in terminals.EnumerateArray())
-            {
-                try
-                {
-                    var registration = element.Deserialize<TerminalRegistration>(Options);
-                    if (IsValid(registration)) valid.Add(registration!);
-                }
-                catch (JsonException)
-                {
-                    // One invalid registration must not hide the rest of the registry.
-                }
-            }
-            return valid;
         }
-        catch (JsonException)
-        {
-            PreserveUnreadableFile();
-            return [];
-        }
+        finally { gate.Release(); }
     }
 
-    // The file exists but cannot be understood: keep it as evidence instead of letting the next save overwrite it.
-    private void PreserveUnreadableFile()
+    private async Task PreserveUnreadableFileAsync(byte[] content, CancellationToken cancellationToken)
     {
-        try
-        {
-            var backup = $"{_path}.corrupt-{DateTime.UtcNow:yyyyMMddHHmmss}";
-            if (!File.Exists(backup)) File.Move(_path, backup);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            // The registry still reports empty; the damaged file simply stays where it is.
-        }
+        var backup = $"{_path}.corrupt-{DateTime.UtcNow:yyyyMMddHHmmssfffffff}-{Guid.NewGuid():N}";
+        try { await File.WriteAllBytesAsync(backup, content, cancellationToken); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
     }
 
     public async Task SaveAsync(IReadOnlyList<TerminalRegistration> terminals, CancellationToken cancellationToken = default)
@@ -82,27 +82,36 @@ public sealed class JsonTerminalRegistry : ITerminalRegistry
         ArgumentNullException.ThrowIfNull(terminals);
         var invalid = terminals.FirstOrDefault(item => !IsValid(item));
         if (invalid is not null) throw new ArgumentException("All terminal registrations must be valid.", nameof(terminals));
-
-        var directory = Path.GetDirectoryName(Path.GetFullPath(_path))!;
-        Directory.CreateDirectory(directory);
-        var temporaryPath = Path.Combine(directory, $".{Path.GetFileName(_path)}.{Guid.NewGuid():N}.tmp");
+        var gate = GetGate();
+        await gate.WaitAsync(cancellationToken);
         try
         {
-            await using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
-                             4096, FileOptions.Asynchronous | FileOptions.WriteThrough))
+            await using var processLock = await InterprocessFileLock.AcquireAsync(_path, cancellationToken);
+            var directory = Path.GetDirectoryName(Path.GetFullPath(_path))!;
+            Directory.CreateDirectory(directory);
+            var temporaryPath = Path.Combine(directory, $".{Path.GetFileName(_path)}.{Guid.NewGuid():N}.tmp");
+            try
             {
-                await JsonSerializer.SerializeAsync(stream,
-                    new TerminalRegistryDocument(CurrentVersion, terminals), Options, cancellationToken);
-                await stream.FlushAsync(cancellationToken);
-                stream.Flush(flushToDisk: true);
+                await using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                                 4096, FileOptions.Asynchronous | FileOptions.WriteThrough))
+                {
+                    await JsonSerializer.SerializeAsync(stream,
+                        new TerminalRegistryDocument(CurrentVersion, terminals), Options, cancellationToken);
+                    await stream.FlushAsync(cancellationToken);
+                    stream.Flush(flushToDisk: true);
+                }
+                File.Move(temporaryPath, _path, overwrite: true);
             }
-            File.Move(temporaryPath, _path, overwrite: true);
+            finally
+            {
+                try { File.Delete(temporaryPath); }
+                catch (FileNotFoundException) { }
+            }
         }
-        finally
-        {
-            if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
-        }
+        finally { gate.Release(); }
     }
+
+    private SemaphoreSlim GetGate() => PathGates.GetOrAdd(Path.GetFullPath(_path), static _ => new SemaphoreSlim(1, 1));
 
     internal static bool IsValid(TerminalRegistration? registration) => registration is not null &&
         registration.Id != Guid.Empty &&

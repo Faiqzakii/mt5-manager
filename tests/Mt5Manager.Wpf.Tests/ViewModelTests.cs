@@ -100,6 +100,33 @@ public sealed class ViewModelTests
         vm.Terminals.Single().Should().NotBeSameAs(original); vm.Terminals.Single().Terminal.Arguments.Should().Equal("/portable","/skipupdate");
     }
 
+    [Fact] public async Task Superseded_discovery_refresh_cannot_commit_or_clear_active_state()
+    {
+        var stale=T("Stale"); var current=T("Current"); var discovery=new SequencedDiscovery();
+        var vm=new MainViewModel(discovery,new Registry(),new Process());
+        var first=vm.RefreshAsync(); await discovery.FirstStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var second=vm.RefreshAsync(); await discovery.SecondStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        discovery.ReleaseFirst.SetResult([stale]);
+        await first.WaitAsync(TimeSpan.FromSeconds(2));
+        vm.IsRefreshing.Should().BeTrue("only the active refresh may clear the busy state");
+        discovery.ReleaseSecond.SetResult([current]);
+        await second.WaitAsync(TimeSpan.FromSeconds(2));
+        vm.IsRefreshing.Should().BeFalse();
+        vm.Terminals.Should().ContainSingle(x=>x.Terminal.Id==current.Id);
+    }
+
+    [Fact] public async Task Superseded_discovery_refresh_cannot_mutate_preexisting_same_id_row()
+    {
+        var terminal=T("Shared"); var discovery=new Discovery([terminal]); var process=new OutOfOrderProcess();
+        var vm=new MainViewModel(discovery,new Registry(),process); await vm.RefreshAsync(); var original=vm.Terminals.Single();
+        var stale=vm.RefreshAsync(); await process.StaleStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var latest=vm.RefreshAsync(); await process.LatestStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        process.ReleaseLatest.SetResult(new(TerminalState.Running,22,null)); await latest.WaitAsync(TimeSpan.FromSeconds(2));
+        vm.Terminals.Single().Should().BeSameAs(original); original.State.Should().Be(TerminalState.Running); original.ProcessId.Should().Be(22);
+        process.ReleaseStale.SetResult(new(TerminalState.Stopped,11,null)); await stale.WaitAsync(TimeSpan.FromSeconds(2));
+        original.State.Should().Be(TerminalState.Running); original.ProcessId.Should().Be(22,"a superseded refresh must only mutate its private snapshot");
+    }
+
     static TerminalRegistration T(string name="Alpha", bool verified=true) => new(Guid.NewGuid(),name,@"C:\terminal64.exe",@"C:\Data",@"C:\",[],DiscoverySource.Manual,verified);
 
     [Fact] public async Task Main_filters_and_scan_replaces_results()
@@ -176,6 +203,70 @@ public sealed class ViewModelTests
         row.EnableAlgoCommand.CanExecute(null).Should().BeFalse(); row.DisableAlgoCommand.CanExecute(null).Should().BeFalse();
     }
 
+    [Fact] public async Task Row_projects_the_bridge_installation_state()
+    {
+        var process=new Process { State=new(TerminalState.Running,42,null) }; var bridge=new Bridge{Status=new(BridgeInstallationState.NotCompiled,"s","c",true)};
+        var row=new TerminalRowViewModel(T(),process,bridge:bridge);
+        row.BridgeInstallSummary.Should().Be("Bridge installation unknown");
+        await row.RefreshStateAsync();
+        row.BridgeInstallSummary.Should().Be("Bridge source installed · not compiled");
+        row.InstallBridgeCommand.CanExecute(null).Should().BeTrue();
+    }
+
+    [Fact] public async Task Installed_bridge_is_reported_as_current()
+    {
+        var bridge=new Bridge{Status=new(BridgeInstallationState.Installed,"s","c",true)};
+        var row=new TerminalRowViewModel(T(),new Process(),bridge:bridge);
+        await row.RefreshStateAsync();
+        row.BridgeInstallSummary.Should().Be("Bridge installed and compiled");
+    }
+
+    [Fact] public async Task Row_without_a_resolvable_mql5_folder_hides_the_bridge_state()
+    {
+        var row=new TerminalRowViewModel(T(),new Process(),bridge:new Bridge{Status=null});
+        await row.RefreshStateAsync();
+        row.BridgeInstallSummary.Should().Be("Bridge installation unavailable");
+    }
+
+    [Fact] public async Task Install_bridge_command_records_its_audit_entry_and_result()
+    {
+        var audit=new Audit(); var bridge=new Bridge();
+        var row=new TerminalRowViewModel(T(),new Process(),audit:audit,bridge:bridge);
+        await row.RefreshStateAsync();
+        await row.InstallBridgeAsync();
+        bridge.Installs.Should().Be(1);
+        row.LastResult.Should().Be("Bridge installed and compiled.");
+        row.BridgeInstallSummary.Should().Be("Bridge installed and compiled");
+        audit.Records.Should().ContainSingle(x=>x.Operation=="Install bridge"&&x.Outcome==AuditOutcome.Completed);
+    }
+
+    [Fact] public async Task Failed_bridge_install_surfaces_the_error_and_audits_a_rejection()
+    {
+        var audit=new Audit(); var bridge=new Bridge{Result=new(false,"Bridge compilation failed: error 256",new(BridgeInstallationState.NotCompiled,"s","c",true))};
+        var row=new TerminalRowViewModel(T(),new Process(),audit:audit,bridge:bridge);
+        await row.RefreshStateAsync();
+        await row.InstallBridgeAsync();
+        row.Error.Should().Be("Bridge compilation failed: error 256");
+        row.LastResult.Should().Be("Failed: Bridge compilation failed: error 256");
+        audit.Records.Should().ContainSingle(x=>x.Operation=="Install bridge"&&x.Outcome==AuditOutcome.Rejected);
+    }
+
+    [Fact] public async Task Unverified_row_disables_bridge_installation()
+    {
+        var row=new TerminalRowViewModel(T(verified:false),new Process(),bridge:new Bridge());
+        await row.RefreshStateAsync();
+        row.CanInstallBridge.Should().BeFalse();
+        row.InstallBridgeCommand.CanExecute(null).Should().BeFalse();
+    }
+
+    [Fact] public async Task Row_without_a_bridge_installer_disables_the_install_command()
+    {
+        var row=new TerminalRowViewModel(T(),new Process());
+        await row.RefreshStateAsync();
+        row.CanInstallBridge.Should().BeFalse();
+        row.BridgeInstallSummary.Should().Be("Bridge installation unknown");
+    }
+
     [Fact] public async Task Algo_command_uses_shared_service_and_projects_returned_snapshot()
     {
         var terminal=T(); var process=new Process { State=new(TerminalState.Running,42,null) }; var runtime=new Runtime{Snapshot=NewSnapshot(AlgoTradingState.Disabled)};
@@ -250,6 +341,16 @@ public sealed class ViewModelTests
         var terminal=T(); var vm=new CleanupViewModel(terminal,new Inspector(),CoordinatorFor(terminal,false)); vm.Categories[0].IsSelected=true; vm.IsDestructiveConfirmed=true;
         await vm.PrepareAsync(); vm.RequiresForceConfirmation.Should().BeFalse(); vm.CanContinue.Should().BeTrue(); await vm.ContinueAsync(false);
         vm.ResultText.Should().Contain("Completed");
+    }
+
+    [Fact] public async Task Successful_cleanup_is_a_result_not_an_error()
+    {
+        var terminal=T(); var vm=new CleanupViewModel(terminal,new Inspector(),CoordinatorFor(terminal,false));
+        vm.ResultText.Should().BeNull();
+        vm.Categories[0].IsSelected=true; vm.IsDestructiveConfirmed=true;
+        await vm.PrepareAsync(); await vm.ContinueAsync(false);
+        vm.ResultText.Should().Contain("Completed");
+        vm.Error.Should().BeNull();
     }
 
     [Fact] public async Task Continue_availability_notifies_and_disables_during_and_after_execution()
@@ -334,6 +435,31 @@ public sealed class ViewModelTests
     }
 
     [Fact]
+    public async Task Force_declined_cleanup_is_an_error_not_a_success_result()
+    {
+        var terminal=T(); var completedCalls=0;
+        var vm=new CleanupViewModel(terminal,new Inspector(),CoordinatorFor(terminal),_=>{completedCalls++;return Task.CompletedTask;});
+        vm.Categories[0].IsSelected=true; vm.IsDestructiveConfirmed=true;
+        await vm.PrepareAsync(); await vm.ContinueAsync(false);
+        vm.ResultText.Should().BeNull();
+        vm.Error.Should().Contain("force termination was declined");
+        completedCalls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Rejected_cleanup_is_an_error_not_a_success_result()
+    {
+        var terminal=T(); var process=new Process{State=new(TerminalState.Stopped,null,null)}; var completedCalls=0;
+        var coordinator=new TerminalOperationCoordinator(new Registry{Items=[terminal]},process,new Cleaner(),new Audit());
+        var vm=new CleanupViewModel(terminal,new Inspector(),coordinator,_=>{completedCalls++;return Task.CompletedTask;});
+        vm.Categories[0].IsSelected=true; vm.IsDestructiveConfirmed=true;
+        await vm.PrepareAsync(); process.State=new(TerminalState.Error,null,"State inspection failed."); await vm.ContinueAsync(false);
+        vm.ResultText.Should().BeNull();
+        vm.Error.Should().Be("State inspection failed.");
+        completedCalls.Should().Be(0);
+    }
+
+    [Fact]
     public async Task Manual_registration_surfaces_registry_write_failures()
     {
         var vm=new MainViewModel(new Discovery([]),new Registry{ThrowOnSave=true},new Process());
@@ -365,6 +491,41 @@ public sealed class ViewModelTests
         process.Calls.Should().BeLessThanOrEqualTo(2);
     }
 
+    sealed class SequencedDiscovery:ITerminalDiscovery
+    {
+        int calls;
+        public TaskCompletionSource FirstStarted=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource SecondStarted=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<IReadOnlyList<TerminalRegistration>> ReleaseFirst=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<IReadOnlyList<TerminalRegistration>> ReleaseSecond=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<IReadOnlyList<TerminalRegistration>> DiscoverAsync(CancellationToken cancellationToken=default)
+        {
+            if(Interlocked.Increment(ref calls)==1){FirstStarted.SetResult();return ReleaseFirst.Task;}
+            SecondStarted.SetResult();return ReleaseSecond.Task;
+        }
+    }
+
+    sealed class OutOfOrderProcess:ITerminalProcessController
+    {
+        int calls;
+        public TaskCompletionSource StaleStarted=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource LatestStarted=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<TerminalRuntimeState> ReleaseStale=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<TerminalRuntimeState> ReleaseLatest=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<TerminalRuntimeState> GetStateAsync(TerminalRegistration terminal,CancellationToken cancellationToken)
+        {
+            return Interlocked.Increment(ref calls) switch
+            {
+                1=>Task.FromResult(new TerminalRuntimeState(TerminalState.Stopped,null,null)),
+                2=>Start(StaleStarted,ReleaseStale.Task),
+                _=>Start(LatestStarted,ReleaseLatest.Task)
+            };
+        }
+        static Task<TerminalRuntimeState> Start(TaskCompletionSource started,Task<TerminalRuntimeState> result){started.SetResult();return result;}
+        public Task<int> StartAsync(TerminalRegistration terminal,CancellationToken cancellationToken)=>Task.FromResult(1);
+        public Task<StopResult> StopAsync(TerminalRegistration terminal,TimeSpan timeout,bool force,CancellationToken cancellationToken)=>Task.FromResult(new StopResult(StopOutcome.AlreadyStopped,null));
+    }
+
     sealed class Discovery(IReadOnlyList<TerminalRegistration> items):ITerminalDiscovery { public IReadOnlyList<TerminalRegistration> Items=items; public Task<IReadOnlyList<TerminalRegistration>> DiscoverAsync(CancellationToken c=default)=>Task.FromResult(Items); }
     sealed class ThrowingDiscovery(Exception failure):ITerminalDiscovery { public Task<IReadOnlyList<TerminalRegistration>> DiscoverAsync(CancellationToken c=default)=>Task.FromException<IReadOnlyList<TerminalRegistration>>(failure); }
     sealed class Registry:ITerminalRegistry { public IReadOnlyList<TerminalRegistration> Items=[]; public bool ThrowOnSave; public Task<IReadOnlyList<TerminalRegistration>> LoadAsync(CancellationToken c=default)=>Task.FromResult(Items); public Task SaveAsync(IReadOnlyList<TerminalRegistration> t,CancellationToken c=default){if(ThrowOnSave)throw new IOException("The registry is locked.");Items=t;return Task.CompletedTask;} }
@@ -389,4 +550,12 @@ public sealed class ViewModelTests
         }
     }
     static TerminalOperationCoordinator CoordinatorFor(TerminalRegistration t,bool timeout=true,ITerminalCleanupService? cleaner=null){var r=new Registry{Items=[t]};return new(r,new Process{Timeout=timeout},cleaner??new Cleaner(),new Audit());}
+    sealed class Bridge:IBridgeInstaller
+    {
+        public BridgeInstallationStatus? Status=new(BridgeInstallationState.Installed,"source.mq5","expert.ex5",true);
+        public BridgeInstallationResult Result=new(true,"Bridge installed and compiled.",new(BridgeInstallationState.Installed,"source.mq5","expert.ex5",true));
+        public int Installs;
+        public Task<BridgeInstallationStatus?> InspectAsync(TerminalRegistration t,CancellationToken c=default)=>Task.FromResult(Status);
+        public Task<BridgeInstallationResult> InstallAsync(TerminalRegistration t,CancellationToken c=default){Installs++;return Task.FromResult(Result);}
+    }
 }

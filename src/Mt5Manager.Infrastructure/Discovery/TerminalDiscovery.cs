@@ -12,12 +12,14 @@ public sealed class TerminalDiscovery(
     public async Task<IReadOnlyList<TerminalRegistration>> DiscoverAsync(CancellationToken cancellationToken = default)
     {
         var discovered = new Dictionary<TerminalIdentity, TerminalRegistration>();
-        if (registry is not null)
-            foreach (var registration in await registry.LoadAsync(cancellationToken))
-                Merge(discovered, Enrich(registration));
+        IReadOnlyList<TerminalRegistration> registrations = registry is null
+            ? []
+            : (await registry.LoadAsync(cancellationToken)).Select(Enrich).ToArray();
+        foreach (var registration in registrations)
+            Merge(discovered, registration);
         foreach (var source in sources)
             foreach (var candidate in await source.DiscoverAsync(cancellationToken))
-                Merge(discovered, Enrich(candidate));
+                Merge(discovered, MatchRegisteredIdentity(Enrich(candidate), registrations));
 
         var result = discovered.Values
             .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
@@ -34,6 +36,30 @@ public sealed class TerminalDiscovery(
         return resolved is null
             ? candidate
             : candidate with { DataDirectory = resolved, DataDirectoryVerified = true };
+    }
+
+    private static TerminalRegistration MatchRegisteredIdentity(
+        TerminalRegistration candidate,
+        IReadOnlyList<TerminalRegistration> registrations)
+    {
+        if (candidate.Source != DiscoverySource.Process || !string.IsNullOrWhiteSpace(candidate.DataDirectory))
+            return candidate;
+
+        var executable = Canonicalize(candidate.ExecutablePath);
+        var matches = registrations
+            .Select(Normalize)
+            .Where(registration => registration.DataDirectory.Length > 0 &&
+                StringComparer.OrdinalIgnoreCase.Equals(registration.ExecutablePath, executable))
+            .GroupBy(registration => registration.DataDirectory, StringComparer.OrdinalIgnoreCase)
+            .Take(2)
+            .ToArray();
+        return matches.Length == 1
+            ? candidate with
+            {
+                DataDirectory = matches[0].Key,
+                DataDirectoryVerified = matches[0].First().DataDirectoryVerified
+            }
+            : candidate;
     }
 
     private static void Merge(

@@ -37,9 +37,11 @@ Tidak ada instalasi; aplikasi berjalan portabel. Data aplikasi tersimpan di:
 
 Tanpa bridge, MT5 Manager tetap bisa start/stop terminal, tetapi status akun dan kontrol Algo Trading tidak tersedia.
 
-1. Salin `Mt5ManagerBridge.mq5` (ada di release dan di folder aplikasi) ke `<DataFolder MT5>\MQL5\Experts\` — dari MT5: **File → Open Data Folder**, lalu navigasikan ke `MQL5\Experts`.
-2. Buka MetaEditor (F4), buka file tersebut, lalu **Compile** (F7).
-3. Di MT5, seret EA `Mt5ManagerBridge` ke chart mana saja. Satu chart cukup; EA tidak melakukan trading, hanya menulis snapshot runtime tiap 3 detik ke folder Common.
+1. Pilih terminal yang data directory-nya sudah terverifikasi.
+2. Klik **Install bridge**. MT5 Manager menyalin `Mt5ManagerBridge.mq5` terbaru ke `<DataFolder MT5>\MQL5\Experts\` dan mengompilasinya dengan `MetaEditor64.exe` milik terminal tersebut.
+3. Di MT5, seret EA `Mt5ManagerBridge` ke chart mana saja. Satu chart cukup; EA tidak melakukan trading, hanya menulis snapshot runtime kira-kira setiap 3 detik ke folder Common.
+
+Jika `MetaEditor64.exe` tidak tersedia di samping `terminal64.exe`, source tetap terpasang dan aplikasi meminta Anda membukanya di MetaEditor lalu menekan **F7**. Tombol yang sama dapat dipakai lagi untuk memperbarui bridge saat versi bawaan aplikasi berubah. Instalasi ditolak untuk data directory yang belum terverifikasi.
 
 Snapshot ditulis ke `%APPDATA%\MetaQuotes\Terminal\Common\Files\Mt5Manager\` dan dibaca oleh MT5 Manager untuk seluruh terminal.
 
@@ -71,10 +73,10 @@ git clone <repo-url>
 cd MT5-Manager
 dotnet publish src/Mt5Manager.Wpf -p:PublishProfile=win-x64          # self-contained, single-file
 dotnet publish src/Mt5Manager.Wpf -p:PublishProfile=win-x64-framework-dependent
-dotnet test Mt5Manager.sln --configuration Release                    # 297 test
+dotnet test Mt5Manager.sln --configuration Release                    # 333 test
 ```
 
-Output ada di `artifacts/publish/`.
+Output publish ada di `artifacts/publish/Mt5Manager.Wpf-win-x64/` dan `artifacts/publish/Mt5Manager.Wpf-win-x64-framework-dependent/`, sesuai nama arsip release.
 
 ## Batasan
 

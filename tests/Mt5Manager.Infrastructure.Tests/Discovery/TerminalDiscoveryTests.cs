@@ -104,6 +104,42 @@ public sealed class TerminalDiscoveryTests : IDisposable
     }
 
     [Fact]
+    public async Task Discover_deduplicates_process_without_data_directory_against_unambiguous_registration()
+    {
+        var registry = new JsonTerminalRegistry(Path.Combine(_root, "terminals.json"));
+        var registered = Candidate(DiscoverySource.Manual, @"C:\MT5\terminal64.exe", @"C:\Data", "Manual");
+        await registry.SaveAsync([registered]);
+        var process = Candidate(DiscoverySource.Process, @"c:\mt5\.\terminal64.exe", string.Empty, "Running") with
+        {
+            DataDirectoryVerified = false
+        };
+
+        var result = await new TerminalDiscovery([new StubSource(process)], registry).DiscoverAsync();
+
+        result.Should().ContainSingle().Which.Should().BeEquivalentTo(registered, options => options.Excluding(item => item.Id));
+        result.Should().ContainSingle().Which.Source.Should().Be(DiscoverySource.Manual);
+    }
+
+    [Fact]
+    public async Task Discover_does_not_merge_process_without_data_directory_when_registrations_are_ambiguous()
+    {
+        var registry = new JsonTerminalRegistry(Path.Combine(_root, "terminals.json"));
+        var executable = @"C:\MT5\terminal64.exe";
+        var first = Candidate(DiscoverySource.Manual, executable, @"C:\Data-One", "One");
+        var second = Candidate(DiscoverySource.Manual, executable, @"C:\Data-Two", "Two");
+        await registry.SaveAsync([first, second]);
+        var process = Candidate(DiscoverySource.Process, executable, string.Empty, "Running") with
+        {
+            DataDirectoryVerified = false
+        };
+
+        var result = await new TerminalDiscovery([new StubSource(process)], registry).DiscoverAsync();
+
+        result.Should().HaveCount(3);
+        result.Should().Contain(item => item.Source == DiscoverySource.Process && item.DataDirectory.Length == 0);
+    }
+
+    [Fact]
     public async Task Discover_enriches_an_unverified_terminal_before_deduplication_and_persistence()
     {
         var registry = new JsonTerminalRegistry(Path.Combine(_root, "terminals.json"));

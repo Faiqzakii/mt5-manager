@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using FluentAssertions;
 using Mt5Manager.Application.Abstractions;
@@ -123,6 +124,61 @@ public sealed class JsonLinesAuditLoggerTests : IDisposable
         var action = () => logger.AppendAsync(Record(Guid.NewGuid(), AuditOutcome.Completed));
 
         await action.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task Concurrent_logger_instances_do_not_lose_records()
+    {
+        var loggers = Enumerable.Range(0, 20).Select(_ => new JsonLinesAuditLogger(AuditPath)).ToArray();
+        var terminalIds = Enumerable.Range(0, 20).Select(_ => Guid.NewGuid()).ToArray();
+
+        await Task.WhenAll(loggers.Zip(terminalIds).Select(pair => pair.First.AppendAsync(Record(pair.Second, AuditOutcome.Completed))));
+
+        (await File.ReadAllLinesAsync(AuditPath)).Select(ReadTerminalId).Should().BeEquivalentTo(terminalIds);
+    }
+
+    [Fact]
+    public async Task Trailing_malformed_record_is_ignored_without_losing_valid_history()
+    {
+        var logger = new JsonLinesAuditLogger(AuditPath);
+        var terminalId = Guid.NewGuid();
+        var first = Record(terminalId, AuditOutcome.Completed);
+        await logger.AppendAsync(first);
+        await File.AppendAllTextAsync(AuditPath, "{partial");
+
+        var second = Record(terminalId, AuditOutcome.Rejected);
+        await logger.AppendAsync(second);
+
+        (await logger.ReadAsync(terminalId)).Should().BeEquivalentTo([second, first], options => options.WithStrictOrdering());
+        (await File.ReadAllLinesAsync(AuditPath)).Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task Append_preserves_original_bytes_when_invalid_records_are_rewritten()
+    {
+        var logger = new JsonLinesAuditLogger(AuditPath);
+        var original = Encoding.UTF8.GetBytes("{}\n{partial");
+        await File.WriteAllBytesAsync(AuditPath, original);
+
+        var valid = Record(Guid.NewGuid(), AuditOutcome.Completed);
+        await logger.AppendAsync(valid);
+
+        (await File.ReadAllLinesAsync(AuditPath)).Should().ContainSingle();
+        var evidence = Directory.EnumerateFiles(_root, "audit.jsonl.corrupt-*").Should().ContainSingle().Subject;
+        (await File.ReadAllBytesAsync(evidence)).Should().Equal(original);
+        (await logger.ReadAsync(valid.TerminalId)).Should().ContainSingle().Which.Should().BeEquivalentTo(valid);
+    }
+
+    [Fact]
+    public async Task Read_ignores_semantically_invalid_empty_object_and_preserves_evidence()
+    {
+        await File.WriteAllTextAsync(AuditPath, "{}");
+
+        var records = await new JsonLinesAuditLogger(AuditPath).ReadAsync(Guid.NewGuid());
+
+        records.Should().BeEmpty();
+        var evidence = Directory.EnumerateFiles(_root, "audit.jsonl.corrupt-*").Should().ContainSingle().Subject;
+        (await File.ReadAllTextAsync(evidence)).Should().Be("{}");
     }
 
     private static Guid ReadTerminalId(string line)

@@ -8,6 +8,8 @@
 
 **Tech Stack:** .NET 8, C#, Win32 `SendInput`, xUnit, FluentAssertions
 
+> **Superseded.** This plan was implemented (commits `efc3dc7`, `fb31e37`) and then replaced. Foreground leasing cannot work when Windows refuses foreground activation — the failure mode observed on the VPS as `The MetaTrader 5 window could not be brought to the foreground.` The controller now posts `WM_COMMAND 32851`, the toolbar command behind Ctrl+E, which needs no foreground ownership. See `docs/superpowers/specs/2026-09-11-terminal-account-algo-control-design.md`. Retained for history only.
+
 ---
 
 ### Task 1: Reproduce focus restoration race

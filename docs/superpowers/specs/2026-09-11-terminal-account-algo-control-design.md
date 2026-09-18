@@ -6,7 +6,7 @@ Show the active MT5 account for every detected terminal and provide a safe per-t
 
 ## Scope
 
-The feature targets MetaTrader 5. “Algo Trading” means the global terminal permission represented by `TERMINAL_TRADE_ALLOWED` and the MT5 toolbar/Ctrl+E command. It does not independently enable or disable individual Expert Advisors or charts.
+The feature targets MetaTrader 5. “Algo Trading” means the global terminal permission represented by `TERMINAL_TRADE_ALLOWED` and the MT5 toolbar/Ctrl+E command. It does not independently enable or disable individual Expert Advisors or charts. The manager drives that command by posting the toolbar command identifier `WM_COMMAND 32851` to the matched window, which is equivalent to Ctrl+E and does not require the window to be foreground or restored.
 
 ## Terminal-side bridge
 
@@ -21,9 +21,9 @@ A bundled MQL5 Expert Advisor publishes a versioned runtime snapshot containing:
 - `ACCOUNT_TRADE_ALLOWED`;
 - `ACCOUNT_TRADE_EXPERT`.
 
-The bridge writes through `FILE_COMMON` using a temporary record followed by atomic replacement. Each terminal writes a distinct record keyed by a stable hash of its canonical data path. No credentials, passwords, or trading commands are stored.
+The bridge writes through `FILE_COMMON` using a temporary record, rotates the previous final record to `.bak`, and moves the temporary record into place. Because MQL5 does not provide a replace-existing atomic rename, the writer restores a stranded backup before the next rotation and the manager may read `.bak` only when the final record is absent or invalid. Each terminal writes a distinct record keyed by a stable hash of its canonical data path. No credentials, passwords, or trading commands are stored.
 
-The manager accepts a snapshot only when its protocol is supported, it is fresh, and its reported canonical data path exactly matches the terminal’s verified data directory. A missing, stale, malformed, or mismatched snapshot produces `Bridge unavailable` or `Unknown`; it never falls back to account files, window captions, or process memory.
+The manager applies the same full validation to either record: the protocol must be supported, the timestamp fresh, and the reported canonical data path equal to the terminal’s verified data directory. A stale, malformed, or mismatched final and backup produces `Bridge unavailable` or `Unknown`; it never falls back to account files, window captions, or process memory.
 
 ## Account presentation
 
@@ -39,7 +39,7 @@ The manager exposes an Enable/Disable action per running terminal. The action is
 - the current global Algo Trading state is known;
 - no operation is already in progress.
 
-If the requested state already equals the reported state, the action is a no-op. Otherwise the manager activates the exact matched terminal window and sends the official Ctrl+E shortcut. It then polls the bridge snapshot until `TERMINAL_TRADE_ALLOWED` equals the requested state or a short timeout expires. Success is reported only after observed state change. Ambiguous windows, inability to focus/send input, stale bridge data, or timeout fail closed with a visible error.
+If the requested state already equals the reported state, the action is a no-op. Otherwise the manager posts the Algo Trading command identifier to the exact matched terminal window as `WM_COMMAND 32851`, the same command the toolbar button and Ctrl+E invoke. The post does not require foreground ownership, visibility, or a restored window, so the action succeeds while the terminal is minimized, occluded, on a locked desktop, or on a disconnected RDP session. The command is posted exactly once because it is a toggle. It then polls the bridge snapshot until `TERMINAL_TRADE_ALLOWED` equals the requested state or a timeout of 10 seconds expires, exceeding the bridge's 3-second write cadence. Success is reported only after observed state change. Ambiguous windows, a failed post, stale bridge data, or timeout fail closed with a visible error; a confirmation timeout never triggers a second post.
 
 The manager does not claim that global Algo Trading alone makes an EA able to trade. The dashboard separately displays terminal, EA, account, and connection permission indicators from the bridge.
 
@@ -51,14 +51,14 @@ Shortcut `/datadir` arguments are parsed before portable or AppData-origin resol
 
 - Domain: immutable runtime account/algo snapshot and state enums.
 - Application: `ITerminalRuntimeInspector` for validated bridge reads and `ITerminalAlgoTradingController` for desired-state control.
-- Infrastructure: atomic bridge snapshot reader, process/window matcher, and Ctrl+E sender.
+- Infrastructure: validated bridge snapshot reader with backup recovery, process/window matcher, and `WM_COMMAND 32851` command poster.
 - WPF: row state, account/status labels, and Enable/Disable commands.
 - MQL5: source EA distributed with the application plus installation instructions in the UI.
 
 ## Error handling and safety
 
-All bridge reads are best effort and isolated per terminal. Invalid records never hide terminal lifecycle/storage state. Algo commands are serialized per terminal. The controller revalidates process identity, window uniqueness, bridge freshness, and current state immediately before input. It never broadcasts Ctrl+E and never sends it to the foreground window without identity matching.
+All bridge reads are best effort and isolated per terminal. Invalid records never hide terminal lifecycle/storage state. Algo commands are serialized per terminal. The controller revalidates process identity, window uniqueness, bridge freshness, and current state immediately before posting. It never broadcasts the command and never posts it to a window that was not identity-matched to the target process.
 
 ## Testing and verification
 
-TDD covers bridge parsing/freshness/path correlation, account projection, command enablement, desired-state no-op, exact-window targeting, timeout/error behavior, and the `/datadir` conflict regression. Infrastructure tests use fake window/input boundaries; WPF tests verify observable row behavior. The MQL5 source is compile-checked when MetaEditor is available. End-to-end smoke uses an isolated fixture or a non-production terminal and never performs cleanup.
+TDD covers bridge parsing/freshness/path correlation, account projection, command enablement, desired-state no-op, exact-window targeting, single-post toggle semantics, timeout/error behavior, and the `/datadir` conflict regression. Infrastructure tests use fake window/command boundaries; WPF tests verify observable row behavior. The MQL5 source is compile-checked when MetaEditor is available. End-to-end smoke uses an isolated fixture or a non-production terminal and never performs cleanup.

@@ -2,6 +2,8 @@ using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Mt5Manager.Application.Telegram;
 using Mt5Manager.Infrastructure.Persistence;
+using Mt5Manager.Application.Abstractions;
+using Mt5Manager.Infrastructure.Bridge;
 using Mt5Manager.Infrastructure.Security;
 using Mt5Manager.Infrastructure.Telegram;
 using Mt5Manager.Wpf.ViewModels;
@@ -30,6 +32,19 @@ public sealed class AppCompositionTests
             x.Lifetime == ServiceLifetime.Transient);
         services.Should().ContainSingle(x => x.ServiceType == typeof(TelegramSettingsDialog) &&
             x.Lifetime == ServiceLifetime.Transient);
+    }
+
+    [Fact]
+    public void ConfigureServices_RegistersTheBridgeInstaller()
+    {
+        var services = new ServiceCollection();
+
+        App.ConfigureServices(services, new HttpClient());
+
+        services.Should().ContainSingle(x => x.ServiceType == typeof(IBridgeInstaller) &&
+            x.ImplementationType == typeof(Mt5BridgeInstaller) && x.Lifetime == ServiceLifetime.Singleton);
+        using var provider = services.BuildServiceProvider();
+        provider.GetRequiredService<MainViewModel>().Should().NotBeNull();
     }
 
     [Fact]

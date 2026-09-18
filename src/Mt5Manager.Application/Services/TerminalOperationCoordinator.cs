@@ -191,7 +191,43 @@ public sealed class TerminalOperationCoordinator
                 }
             }
 
-            results = await _cleanupService.CleanAsync(terminal, request.Categories, cancellationToken);
+            var categoryResults = new List<CleanupCategoryResult>(request.Categories.Count);
+            foreach (var category in request.Categories.OrderBy(static category => category))
+            {
+                var finalState = await _processController.GetStateAsync(terminal, cancellationToken);
+                if (finalState.State == TerminalState.Error)
+                {
+                    cleanupError = finalState.Error ??
+                        "The terminal state could not be determined immediately before deletion.";
+                    break;
+                }
+                if (finalState.State != TerminalState.Stopped)
+                {
+                    wasRunning = true;
+                    cleanupError = "The terminal restarted before cleanup completed, so no further files were deleted.";
+                    break;
+                }
+
+                var categoryResult = await _cleanupService.CleanAsync(
+                    terminal, new HashSet<CleanupCategory> { category }, cancellationToken);
+                categoryResults.AddRange(categoryResult);
+            }
+            if (cleanupError is null)
+            {
+                // The shared per-terminal gate excludes starts routed through this coordinator. A process
+                // launched outside it can still race the cleanup service, so this final observation cannot
+                // make deletion atomic; it only prevents reporting that detectable race as completed.
+                var postCleanupState = await _processController.GetStateAsync(terminal, cancellationToken);
+                if (postCleanupState.State == TerminalState.Error)
+                    cleanupError = postCleanupState.Error ??
+                        "The terminal state could not be determined immediately after cleanup.";
+                else if (postCleanupState.State != TerminalState.Stopped)
+                {
+                    wasRunning = true;
+                    cleanupError = "The terminal restarted during cleanup. Some files may already have been deleted.";
+                }
+            }
+            results = categoryResults;
             // Every requested category was refused and nothing was deleted: report why instead of hiding
             // the refusal behind a "Completed: 0 deleted" outcome.
             if (results.Count > 0 && results.All(category => category.DeletedFiles == 0 && category.Failures.Count > 0))

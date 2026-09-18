@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Mt5Manager.Application.Abstractions;
 using Mt5Manager.Domain.Models;
 
@@ -7,7 +8,8 @@ public sealed class AlgoTradingService : IAlgoTradingService
 {
     private const string UnknownTerminalName = "Unknown terminal";
     private const string SafeFailureMessage = "The operation could not be completed because of a local error.";
-    private static readonly SemaphoreSlim OperationGate = new(1, 1);
+    private static readonly ConcurrentDictionary<Guid, GateState> OperationGates = new();
+    internal static int OperationGateCount => OperationGates.Count;
 
     private readonly ITerminalRegistry registry;
     private readonly ITerminalAlgoTradingController controller;
@@ -28,9 +30,7 @@ public sealed class AlgoTradingService : IAlgoTradingService
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        await OperationGate.WaitAsync(cancellationToken);
-        try
-        {
+        await using var operationGate = await AcquireGateAsync(request.TerminalId, cancellationToken);
             var terminals = await registry.LoadAsync(cancellationToken);
             var terminal = terminals.FirstOrDefault(candidate => candidate.Id == request.TerminalId);
             if (terminal is null)
@@ -59,12 +59,81 @@ public sealed class AlgoTradingService : IAlgoTradingService
                 throw;
             }
 
-            await AppendAuditAsync(request, terminal.DisplayName, controlResult, cancellationToken);
+            try
+            {
+                await AppendAuditAsync(request, terminal.DisplayName, controlResult, cancellationToken);
+            }
+            catch when (controlResult.Success)
+            {
+                // The controller already changed external state. Preserve that success so callers do not
+                // retry a non-idempotent operation merely because local audit persistence failed.
+            }
             return new(request.TerminalId, terminal.DisplayName, request.Enable, controlResult);
-        }
-        finally
+    }
+
+    private static async ValueTask<GateLease> AcquireGateAsync(
+        Guid terminalId,
+        CancellationToken cancellationToken)
+    {
+        while (true)
         {
-            OperationGate.Release();
+            var state = OperationGates.GetOrAdd(terminalId, static _ => new GateState());
+            lock (state)
+            {
+                if (state.Retired)
+                    continue;
+
+                state.ReferenceCount++;
+            }
+
+            try
+            {
+                await state.Semaphore.WaitAsync(cancellationToken);
+                return new GateLease(terminalId, state);
+            }
+            catch
+            {
+                ReleaseGate(terminalId, state, acquired: false);
+                throw;
+            }
+        }
+    }
+
+    private static void ReleaseGate(Guid terminalId, GateState state, bool acquired)
+    {
+        if (acquired)
+            state.Semaphore.Release();
+
+        lock (state)
+        {
+            state.ReferenceCount--;
+            if (state.ReferenceCount != 0)
+                return;
+
+            state.Retired = true;
+            OperationGates.TryRemove(new KeyValuePair<Guid, GateState>(terminalId, state));
+        }
+
+        state.Semaphore.Dispose();
+    }
+
+    private sealed class GateState
+    {
+        public SemaphoreSlim Semaphore { get; } = new(1, 1);
+        public int ReferenceCount { get; set; }
+        public bool Retired { get; set; }
+    }
+
+    private sealed class GateLease(Guid terminalId, GateState state) : IAsyncDisposable
+    {
+        private int released;
+
+        public ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref released, 1) == 0)
+                ReleaseGate(terminalId, state, acquired: true);
+
+            return ValueTask.CompletedTask;
         }
     }
 

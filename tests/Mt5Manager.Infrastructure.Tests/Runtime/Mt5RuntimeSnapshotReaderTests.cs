@@ -43,6 +43,26 @@ public sealed class Mt5RuntimeSnapshotReaderTests : IDisposable
     }
 
     [Fact]
+    public async Task Read_rejects_snapshot_beyond_future_clock_skew_tolerance()
+    {
+        WriteSnapshot(Mt5RuntimeSnapshotReader.ProtocolVersion, DateTimeOffset.UtcNow.AddMinutes(2), root, true, AlgoTradingState.Enabled);
+
+        (await new Mt5RuntimeSnapshotReader(root).ReadAsync(terminal)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Read_honors_cancellation()
+    {
+        WriteSnapshot(Mt5RuntimeSnapshotReader.ProtocolVersion, DateTimeOffset.UtcNow, root, true, AlgoTradingState.Enabled);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        var act = async () => await new Mt5RuntimeSnapshotReader(root).ReadAsync(terminal, cancellation.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    [Fact]
     public async Task Read_rejects_mismatched_data_path()
     {
         WriteSnapshot(Mt5RuntimeSnapshotReader.ProtocolVersion, DateTimeOffset.UtcNow, @"C:\Other\Data", true, AlgoTradingState.Enabled);
@@ -84,6 +104,50 @@ public sealed class Mt5RuntimeSnapshotReaderTests : IDisposable
     }
 
     [Fact]
+    public async Task Read_falls_back_to_fresh_valid_backup_when_final_is_missing()
+    {
+        WriteSnapshot(Mt5RuntimeSnapshotReader.ProtocolVersion, DateTimeOffset.UtcNow, root, true, AlgoTradingState.Enabled, ".bak");
+
+        (await new Mt5RuntimeSnapshotReader(root).ReadAsync(terminal))!.Login.Should().Be(12345);
+    }
+
+    [Fact]
+    public async Task Read_falls_back_to_fresh_valid_backup_when_final_is_invalid()
+    {
+        WriteRaw("not json");
+        WriteSnapshot(Mt5RuntimeSnapshotReader.ProtocolVersion, DateTimeOffset.UtcNow, root, true, AlgoTradingState.Enabled, ".bak");
+
+        (await new Mt5RuntimeSnapshotReader(root).ReadAsync(terminal))!.Login.Should().Be(12345);
+    }
+
+    [Fact]
+    public async Task Read_prefers_valid_final_over_backup()
+    {
+        WriteSnapshot(Mt5RuntimeSnapshotReader.ProtocolVersion, DateTimeOffset.UtcNow, root, true, AlgoTradingState.Enabled);
+        WriteSnapshot(Mt5RuntimeSnapshotReader.ProtocolVersion, DateTimeOffset.UtcNow, root, false, AlgoTradingState.Disabled, ".bak");
+
+        (await new Mt5RuntimeSnapshotReader(root).ReadAsync(terminal))!.Connected.Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData(-10)]
+    [InlineData(2)]
+    public async Task Read_rejects_backup_outside_freshness_window(int minutes)
+    {
+        WriteSnapshot(Mt5RuntimeSnapshotReader.ProtocolVersion, DateTimeOffset.UtcNow.AddMinutes(minutes), root, true, AlgoTradingState.Enabled, ".bak");
+
+        (await new Mt5RuntimeSnapshotReader(root).ReadAsync(terminal)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Read_rejects_invalid_backup()
+    {
+        WriteRaw("not json", ".bak");
+
+        (await new Mt5RuntimeSnapshotReader(root).ReadAsync(terminal)).Should().BeNull();
+    }
+
+    [Fact]
     public async Task Read_survives_missing_or_inaccessible_record()
     {
         (await new Mt5RuntimeSnapshotReader(Path.Combine(root, "missing-common")).ReadAsync(terminal)).Should().BeNull();
@@ -100,7 +164,7 @@ public sealed class Mt5RuntimeSnapshotReaderTests : IDisposable
             .Should().Be(Path.Combine(root, "Mt5Manager", $"runtime-{bridgeHash}.json"));
     }
 
-    private void WriteSnapshot(int protocolVersion, DateTimeOffset timestamp, string dataPath, bool connected, AlgoTradingState global) =>
+    private void WriteSnapshot(int protocolVersion, DateTimeOffset timestamp, string dataPath, bool connected, AlgoTradingState global, string suffix = "") =>
         WriteRaw(JsonSerializer.Serialize(new
         {
             protocolVersion,
@@ -116,11 +180,11 @@ public sealed class Mt5RuntimeSnapshotReaderTests : IDisposable
             eaTradingAllowed = true,
             accountTradingAllowed = true,
             accountExpertAllowed = true
-        }));
+        }), suffix);
 
-    private void WriteRaw(string content)
+    private void WriteRaw(string content, string suffix = "")
     {
-        var recordPath = Mt5RuntimeSnapshotReader.SnapshotPath(root, terminal.DataDirectory);
+        var recordPath = Mt5RuntimeSnapshotReader.SnapshotPath(root, terminal.DataDirectory) + suffix;
         Directory.CreateDirectory(Path.GetDirectoryName(recordPath)!);
         File.WriteAllText(recordPath, content);
     }

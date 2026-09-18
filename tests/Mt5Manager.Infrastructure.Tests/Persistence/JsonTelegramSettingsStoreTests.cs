@@ -73,7 +73,8 @@ public sealed class JsonTelegramSettingsStoreTests : IDisposable
         (await store.LoadAsync()).Should().Be(Settings("protected-current", 1, 0, true));
         await store.SaveAsync(Settings("protected-next", 2, 0, true));
 
-        Directory.EnumerateFiles(_root).Should().BeEquivalentTo([SettingsPath]);
+        Directory.EnumerateFiles(_root).Should().BeEquivalentTo([SettingsPath, Path.Combine(_root, ".telegram.json.deadbeef.tmp")],
+            "a save must not delete a temporary file that may belong to another active writer");
         (await store.LoadAsync()).Should().Be(Settings("protected-next", 2, 0, true));
     }
 
@@ -137,9 +138,34 @@ public sealed class JsonTelegramSettingsStoreTests : IDisposable
         await File.WriteAllTextAsync(SettingsPath, content);
         var store = new JsonTelegramSettingsStore(SettingsPath);
         (await store.LoadAsync()).Should().BeNull();
-        File.Exists(SettingsPath).Should().BeFalse();
+        File.Exists(SettingsPath).Should().BeTrue();
         var preserved = Directory.EnumerateFiles(_root, "telegram.json.corrupt-*").Single();
         (await File.ReadAllTextAsync(preserved)).Should().Be(content);
+    }
+
+    [Fact]
+    public async Task Concurrent_store_instances_leave_a_complete_settings_document()
+    {
+        var stores = Enumerable.Range(0, 20).Select(_ => new JsonTelegramSettingsStore(SettingsPath)).ToArray();
+        var settings = Enumerable.Range(1, 20).Select(index => Settings($"protected-{index}", index, index, true)).ToArray();
+
+        await Task.WhenAll(stores.Zip(settings).Select(pair => pair.First.SaveAsync(pair.Second)));
+
+        settings.Should().Contain((await stores[0].LoadAsync())!);
+        Directory.EnumerateFiles(_root, ".telegram.json.*.tmp").Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Repeated_corrupt_loads_create_unique_snapshots_without_removing_current_file()
+    {
+        await File.WriteAllTextAsync(SettingsPath, "{broken");
+        var store = new JsonTelegramSettingsStore(SettingsPath);
+
+        await store.LoadAsync();
+        await store.LoadAsync();
+
+        File.Exists(SettingsPath).Should().BeTrue();
+        Directory.EnumerateFiles(_root, "telegram.json.corrupt-*").Should().HaveCount(2);
     }
 
     private static TelegramSettings Settings(string token, long chatId, long offset, bool enabled) =>

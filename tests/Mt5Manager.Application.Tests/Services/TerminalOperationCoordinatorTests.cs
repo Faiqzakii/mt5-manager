@@ -35,11 +35,11 @@ public sealed class TerminalOperationCoordinatorTests
         outcome.Result.Categories.Select(result => result.Category)
             .Should().BeEquivalentTo([CleanupCategory.Logs, CleanupCategory.Ticks]);
         controller.StartedTerminals.Should().BeEmpty();
-        controller.StateCalls.Should().Be(2, "the runtime state is verified again before any deletion");
+        controller.StateCalls.Should().Be(5, "state is verified before and after each deletion");
 
-        cleanup.Requests.Should().ContainSingle();
-        cleanup.Requests[0].Should().BeEquivalentTo(
-            new HashSet<CleanupCategory> { CleanupCategory.Logs, CleanupCategory.Ticks });
+        cleanup.Requests.Should().HaveCount(2);
+        cleanup.Requests.SelectMany(static categories => categories)
+            .Should().BeEquivalentTo([CleanupCategory.Logs, CleanupCategory.Ticks]);
 
         var record = audit.Records.Should().ContainSingle().Subject;
         record.TerminalId.Should().Be(terminalId);
@@ -84,7 +84,7 @@ public sealed class TerminalOperationCoordinatorTests
         outcome.Result.WasRunning.Should().BeTrue();
         outcome.Result.Restarted.Should().BeTrue();
         outcome.Result.RestartError.Should().BeNull();
-        controller.StateCalls.Should().Be(3, "the state is captured before the operation, re-verified before deletion and checked before the restart");
+        controller.StateCalls.Should().Be(5, "state is verified before and after deletion and before restart");
         controller.StartedTerminals.Should().Equal(terminalId);
         cleanup.Requests.Should().ContainSingle();
 
@@ -651,6 +651,56 @@ public sealed class TerminalOperationCoordinatorTests
     }
 
     [Fact]
+    public async Task Terminal_restart_between_categories_fails_closed_without_deleting_remaining_category()
+    {
+        var terminalId = Guid.NewGuid();
+        var controller = new FakeProcessController();
+        var cleanup = new FakeCleanupService();
+        cleanup.AfterClean = () => controller.State = new TerminalRuntimeState(TerminalState.Running, 99, null);
+        var coordinator = Coordinator(new FakeRegistry(Registration(terminalId)), controller, cleanup, new RecordingAuditLogger());
+        var preparation = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs, CleanupCategory.Ticks));
+
+        var outcome = await coordinator.ContinueCleanupAsync(preparation, forceApproved: false);
+
+        outcome.Status.Should().Be(CleanupOutcomeStatus.Rejected);
+        outcome.Message.Should().Contain("restarted");
+        cleanup.Requests.Should().ContainSingle();
+        controller.StartedTerminals.Should().BeEmpty("the externally restarted terminal must not be started twice");
+    }
+
+    [Fact]
+    public async Task Terminal_restart_during_final_category_reports_partial_rejection_and_audits_deleted_files()
+    {
+        var terminalId = Guid.NewGuid();
+        var controller = new FakeProcessController();
+        var cleanup = new FakeCleanupService
+        {
+            ResultFactory = (_, categories) => categories
+                .Select(category => new CleanupCategoryResult(category, 2, 2048, []))
+                .ToArray(),
+            AfterClean = () => controller.State = new TerminalRuntimeState(TerminalState.Running, 99, null)
+        };
+        var audit = new RecordingAuditLogger();
+        var coordinator = Coordinator(new FakeRegistry(Registration(terminalId)), controller, cleanup, audit);
+        var preparation = await coordinator.PrepareCleanupAsync(Request(terminalId, CleanupCategory.Logs));
+
+        var outcome = await coordinator.ContinueCleanupAsync(preparation, forceApproved: false);
+
+        outcome.Status.Should().Be(CleanupOutcomeStatus.Rejected);
+        outcome.Message.Should().Contain("restarted during cleanup");
+        outcome.Result.WasRunning.Should().BeTrue();
+        outcome.Result.Restarted.Should().BeFalse();
+        outcome.Result.Categories.Should().ContainSingle().Which.DeletedFiles.Should().Be(2);
+        controller.StartedTerminals.Should().BeEmpty("the externally restarted terminal must not be started twice");
+
+        var record = audit.Records.Should().ContainSingle().Subject;
+        record.Outcome.Should().Be(AuditOutcome.Rejected);
+        record.Message.Should().Be(outcome.Message);
+        record.WasRunning.Should().BeTrue();
+        record.CategoryOutcomes.Should().ContainSingle().Which.DeletedFiles.Should().Be(2);
+    }
+
+    [Fact]
     public async Task Cancelling_rejected_interleaved_preparation_does_not_release_active_reservation()
     {
         var terminalId = Guid.NewGuid();
@@ -894,6 +944,7 @@ public sealed class TerminalOperationCoordinatorTests
     {
         public List<IReadOnlySet<CleanupCategory>> Requests { get; } = [];
         public Func<TerminalRegistration, IReadOnlySet<CleanupCategory>, IReadOnlyList<CleanupCategoryResult>>? ResultFactory { get; set; }
+        public Action? AfterClean { get; set; }
 
         public Task<IReadOnlyList<CleanupCategoryResult>> CleanAsync(
             TerminalRegistration terminal,
@@ -903,6 +954,7 @@ public sealed class TerminalOperationCoordinatorTests
             Requests.Add(categories);
             var results = ResultFactory?.Invoke(terminal, categories) ??
                 categories.Select(category => new CleanupCategoryResult(category, 0, 0, [])).ToArray();
+            AfterClean?.Invoke();
             return Task.FromResult<IReadOnlyList<CleanupCategoryResult>>(results);
         }
     }

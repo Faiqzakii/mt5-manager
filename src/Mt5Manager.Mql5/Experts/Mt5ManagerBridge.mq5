@@ -35,6 +35,15 @@ void WriteSnapshot()
    string hash = DataPathHash(path);
    string finalName = InpFileNamePrefix + hash + ".json";
    string tempName = finalName + ".tmp";
+   string backupName = finalName + ".bak";
+
+   // A previous update can be interrupted after rotating the final snapshot.
+   // Restore that stranded backup before starting the next rotation.
+   if(!FileIsExist(finalName, FILE_COMMON) && FileIsExist(backupName, FILE_COMMON))
+   {
+      if(!FileMove(backupName, FILE_COMMON, finalName, FILE_COMMON))
+         return;
+   }
 
    string json = "{" +
       "\"protocolVersion\":" + IntegerToString(PROTOCOL_VERSION) + "," +
@@ -59,10 +68,30 @@ void WriteSnapshot()
    FileWriteString(handle, json);
    FileClose(handle);
 
-   if(FileIsExist(finalName, FILE_COMMON))
-      FileDelete(finalName, FILE_COMMON);
-   if(!FileMove(tempName, FILE_COMMON, finalName, FILE_COMMON))
+   // MQL5 has no replace-existing atomic rename. Preserve the last good snapshot
+   // as a backup until the new file is in place, then remove the backup.
+   bool hadSnapshot = FileIsExist(finalName, FILE_COMMON);
+   if(hadSnapshot)
+   {
+      FileDelete(backupName, FILE_COMMON);
+      if(!FileMove(finalName, FILE_COMMON, backupName, FILE_COMMON))
+      {
+         FileDelete(tempName, FILE_COMMON);
+         return;
+      }
+   }
+
+   if(FileMove(tempName, FILE_COMMON, finalName, FILE_COMMON))
+   {
+      if(hadSnapshot)
+         FileDelete(backupName, FILE_COMMON);
+   }
+   else
+   {
       FileDelete(tempName, FILE_COMMON);
+      if(hadSnapshot)
+         FileMove(backupName, FILE_COMMON, finalName, FILE_COMMON);
+   }
 
    nextUpdate = TimeGMT() + REFRESH_SECONDS;
 }

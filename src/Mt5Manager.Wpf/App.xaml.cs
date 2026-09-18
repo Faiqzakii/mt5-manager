@@ -6,6 +6,7 @@ using Mt5Manager.Application.Services;
 using Mt5Manager.Application.Telegram;
 using Mt5Manager.Infrastructure.Discovery;
 using Mt5Manager.Infrastructure.Persistence;
+using Mt5Manager.Infrastructure.Bridge;
 using Mt5Manager.Infrastructure.Processes;
 using Mt5Manager.Infrastructure.Security;
 using Mt5Manager.Infrastructure.Storage;
@@ -67,6 +68,7 @@ public partial class App : System.Windows.Application
         services.AddSingleton<ITerminalCleanupService, TerminalCleanupService>();
         services.AddSingleton<ITerminalRuntimeInspector, Mt5Manager.Infrastructure.Runtime.Mt5RuntimeSnapshotReader>();
         services.AddSingleton<ITerminalAlgoTradingController, WindowsTerminalAlgoTradingController>();
+        services.AddSingleton<IBridgeInstaller, Mt5BridgeInstaller>();
         services.AddSingleton<IAlgoTradingService, AlgoTradingService>();
         services.AddSingleton<ITerminalDiscoverySource, ProcessDiscoverySource>();
         services.AddSingleton<ITerminalDiscoverySource, ShortcutDiscoverySource>();
@@ -97,7 +99,7 @@ public partial class App : System.Windows.Application
             sp.GetRequiredService<ITerminalDiscovery>(), sp.GetRequiredService<ITerminalRegistry>(),
             sp.GetRequiredService<ITerminalProcessController>(), sp.GetRequiredService<ITerminalRuntimeInspector>(),
             sp.GetRequiredService<IAlgoTradingService>(), sp.GetRequiredService<ITerminalStorageInspector>(),
-            sp.GetRequiredService<IAuditLogger>()));
+            sp.GetRequiredService<IAuditLogger>(), sp.GetRequiredService<IBridgeInstaller>()));
         services.AddSingleton(sp => new MainWindow(
             sp.GetRequiredService<MainViewModel>(), sp.GetRequiredService<ITerminalStorageInspector>(),
             sp.GetRequiredService<TerminalOperationCoordinator>(),

@@ -302,6 +302,21 @@ public sealed class TelegramBotServiceTests
     }
 
     [Fact]
+    public async Task Permanent_failure_does_not_skip_later_updates_in_the_same_batch()
+    {
+        await using var f = new Fixture();
+        f.Api.Updates.Enqueue([
+            new(11, new(42, 5, "/start"), null),
+            new(12, new(999, 6, "/start"), null)]);
+        f.Api.SendException = new TelegramBotException(TelegramBotErrorKind.Permanent, "bad request");
+
+        await f.RunAsync(13);
+
+        f.Settings.Saved.Select(x => x.UpdateOffset).Should().Equal(12, 13);
+        f.Delay.Values.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task Bulk_confirmation_includes_only_terminals_in_the_opposite_state()
     {
         await using var f = new Fixture();
@@ -410,6 +425,45 @@ public sealed class TelegramBotServiceTests
         await f.Service.StopAsync(); f.Api.MaxConcurrentPolls.Should().Be(1);
     }
 
+    [Fact]
+    public async Task StartAsync_cannot_restart_while_disposal_is_waiting_for_the_poller()
+    {
+        var f = new Fixture();
+        f.Api.NonCooperativePoll = true;
+        await f.Service.StartAsync();
+        await f.Api.PollEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var disposal = f.Service.DisposeAsync().AsTask();
+        await f.Api.PollCancellation.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var restart = () => f.Service.StartAsync();
+        await restart.Should().ThrowAsync<ObjectDisposedException>();
+
+        f.Api.ReleasePoll.TrySetResult();
+        await disposal.WaitAsync(TimeSpan.FromSeconds(2));
+        f.Service.State.Should().Be(TelegramBotState.Stopped);
+    }
+
+    [Fact]
+    public async Task Concurrent_DisposeAsync_callers_join_the_same_teardown()
+    {
+        var f = new Fixture();
+        f.Api.NonCooperativePoll = true;
+        await f.Service.StartAsync();
+        await f.Api.PollEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var first = f.Service.DisposeAsync().AsTask();
+        await f.Api.PollCancellation.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var second = f.Service.DisposeAsync().AsTask();
+
+        first.IsCompleted.Should().BeFalse();
+        second.IsCompleted.Should().BeFalse();
+        f.Api.ReleasePoll.TrySetResult();
+        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(2));
+
+        f.Service.State.Should().Be(TelegramBotState.Stopped);
+        f.Api.ActivePolls.Should().Be(0);
+    }
+
     private sealed class Fixture : IAsyncDisposable
     {
         public FakeSettings Settings { get; } = new(); public FakeApi Api { get; } = new(); public FakeRegistry Registry { get; } = new();
@@ -443,11 +497,12 @@ public sealed class TelegramBotServiceTests
     }
     private sealed class FakeApi : ITelegramBotApi
     {
-        private int concurrent; public int MaxConcurrentPolls; public bool NonCooperativePoll; public TaskCompletionSource PollEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource ReleasePoll { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously); public Queue<IReadOnlyList<TelegramUpdate>> Updates { get; } = new(); public Queue<Exception> Errors { get; } = new();
+        private int concurrent; public int MaxConcurrentPolls; public bool NonCooperativePoll; public TaskCompletionSource PollEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource PollCancellation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously); public TaskCompletionSource ReleasePoll { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously); public Queue<IReadOnlyList<TelegramUpdate>> Updates { get; } = new(); public Queue<Exception> Errors { get; } = new();
+        public int ActivePolls => Volatile.Read(ref concurrent);
         public List<string> Calls { get; } = []; public List<long> Offsets { get; } = []; public List<(long ChatId, TelegramMessage Message)> Sent { get; } = []; public List<TelegramMessage> Edits { get; } = [];
         public bool ThrowOnEdit; public bool ThrowOnSend; public Exception? SendException; public TelegramMessage LastDelivered => Edits.LastOrDefault() ?? Sent.Last().Message;
         public Task<TelegramConnectionState> GetConnectionStateAsync(string botToken, CancellationToken cancellationToken = default) { Calls.Add("connection"); return Task.FromResult(new TelegramConnectionState(true, "bot", 0, null)); }
-        public async Task<IReadOnlyList<TelegramUpdate>> GetUpdatesAsync(string botToken, long offset, CancellationToken cancellationToken = default) { Calls.Add("updates"); Offsets.Add(offset); var active = Interlocked.Increment(ref concurrent); MaxConcurrentPolls = Math.Max(MaxConcurrentPolls, active); try { if (NonCooperativePoll) { PollEntered.TrySetResult(); await ReleasePoll.Task; return []; } if (Errors.TryDequeue(out var e)) throw e; if (Updates.TryDequeue(out var value)) return value; await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); return []; } finally { Interlocked.Decrement(ref concurrent); } }
+        public async Task<IReadOnlyList<TelegramUpdate>> GetUpdatesAsync(string botToken, long offset, CancellationToken cancellationToken = default) { Calls.Add("updates"); Offsets.Add(offset); var active = Interlocked.Increment(ref concurrent); MaxConcurrentPolls = Math.Max(MaxConcurrentPolls, active); try { if (NonCooperativePoll) { using var registration = cancellationToken.Register(() => PollCancellation.TrySetResult()); PollEntered.TrySetResult(); await ReleasePoll.Task; return []; } if (Errors.TryDequeue(out var e)) throw e; if (Updates.TryDequeue(out var value)) return value; await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); return []; } finally { Interlocked.Decrement(ref concurrent); } }
         public Task<long> SendMessageAsync(string botToken, long chatId, TelegramMessage message, CancellationToken cancellationToken = default) { Calls.Add("send"); if (SendException is not null) throw SendException; if (ThrowOnSend) throw new InvalidOperationException("send failed"); Sent.Add((chatId, message)); return Task.FromResult(9L); }
         public Task EditMessageAsync(string botToken, long chatId, long messageId, TelegramMessage message, CancellationToken cancellationToken = default) { Calls.Add("edit"); Edits.Add(message); if (ThrowOnEdit) throw new InvalidOperationException("edit failed"); return Task.CompletedTask; }
         public Task AnswerCallbackAsync(string botToken, string callbackQueryId, string? text = null, CancellationToken cancellationToken = default) { Calls.Add($"answer:{callbackQueryId}"); return Task.CompletedTask; }

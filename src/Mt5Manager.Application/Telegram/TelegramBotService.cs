@@ -21,6 +21,8 @@ public sealed class TelegramBotService : ITelegramBotService
     private Task? pollingTask;
     private TelegramSettings? settings;
     private string? token;
+    private bool disposed;
+    private Task? disposalTask;
 
     public TelegramBotService(ITelegramSettingsStore settingsStore, ISecretProtector protector, ITelegramBotApi api,
         ITerminalRegistry registry, ITerminalRuntimeInspector runtime, IAlgoTradingService algo,
@@ -41,6 +43,7 @@ public sealed class TelegramBotService : ITelegramBotService
             Task exiting;
             try
             {
+                ObjectDisposedException.ThrowIf(disposed, this);
                 if (pollingTask is { IsCompleted: false } current)
                 {
                     if (State == TelegramBotState.Running) return;
@@ -86,7 +89,58 @@ public sealed class TelegramBotService : ITelegramBotService
     public async Task ApplySettingsAsync(CancellationToken cancellationToken = default)
     { await StopAsync(cancellationToken).ConfigureAwait(false); confirmations.Clear(); await StartAsync(cancellationToken).ConfigureAwait(false); }
 
-    public async ValueTask DisposeAsync() { await StopAsync().ConfigureAwait(false); pollingCancellation?.Dispose(); lifecycle.Dispose(); }
+    public async ValueTask DisposeAsync()
+    {
+        Task? task = null;
+        CancellationTokenSource? source = null;
+        TaskCompletionSource? completion = null;
+        Task teardown;
+
+        await lifecycle.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (disposalTask is not null)
+            {
+                teardown = disposalTask;
+            }
+            else
+            {
+                disposed = true;
+                source = pollingCancellation;
+                source?.Cancel();
+                task = pollingTask;
+                completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                teardown = disposalTask = completion.Task;
+            }
+        }
+        finally { lifecycle.Release(); }
+
+        if (completion is not null)
+        {
+            try
+            {
+                if (task is not null) try { await task.ConfigureAwait(false); } catch (OperationCanceledException) { }
+
+                await lifecycle.WaitAsync().ConfigureAwait(false);
+                try
+                {
+                    pollingTask = null;
+                    pollingCancellation = null;
+                    token = null;
+                    source?.Dispose();
+                    SetState(TelegramBotState.Stopped);
+                }
+                finally { lifecycle.Release(); }
+                completion.TrySetResult();
+            }
+            catch (Exception error)
+            {
+                completion.TrySetException(error);
+            }
+        }
+
+        await teardown.ConfigureAwait(false);
+    }
 
     private async Task PollAsync(CancellationToken cancellationToken)
     {
@@ -100,11 +154,7 @@ public sealed class TelegramBotService : ITelegramBotService
                     var updates = await api.GetUpdatesAsync(token, settings.UpdateOffset, cancellationToken).ConfigureAwait(false);
                     foreach (var update in updates.OrderBy(x => x.UpdateId))
                     {
-                        if (!await HandleUpdateAsync(update, cancellationToken).ConfigureAwait(false))
-                        {
-                            failures = 0;
-                            break;
-                        }
+                        await HandleUpdateAsync(update, cancellationToken).ConfigureAwait(false);
                         failures = 0;
                     }
                     if (updates.Count == 0) failures = 0;
@@ -125,7 +175,7 @@ public sealed class TelegramBotService : ITelegramBotService
         finally { if (State is not (TelegramBotState.Unauthorized or TelegramBotState.Conflict)) SetState(TelegramBotState.Stopped); }
     }
 
-    private async Task<bool> HandleUpdateAsync(TelegramUpdate update, CancellationToken cancellationToken)
+    private async Task HandleUpdateAsync(TelegramUpdate update, CancellationToken cancellationToken)
     {
         try
         {
@@ -135,10 +185,9 @@ public sealed class TelegramBotService : ITelegramBotService
         catch (Exception error) when (Classify(error).Kind == TelegramBotErrorKind.Permanent)
         {
             await AcknowledgeAsync(update.UpdateId, cancellationToken).ConfigureAwait(false);
-            return false;
+            return;
         }
         await AcknowledgeAsync(update.UpdateId, cancellationToken).ConfigureAwait(false);
-        return true;
     }
 
     private async Task AcknowledgeAsync(long updateId, CancellationToken cancellationToken)

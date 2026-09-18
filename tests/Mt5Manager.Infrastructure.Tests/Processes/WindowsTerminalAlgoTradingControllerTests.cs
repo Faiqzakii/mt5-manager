@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using FluentAssertions;
 using Mt5Manager.Application.Abstractions;
 using Mt5Manager.Domain.Models;
@@ -11,240 +10,170 @@ public sealed class WindowsTerminalAlgoTradingControllerTests
     private readonly TerminalRegistration terminal = new(Guid.NewGuid(), "Broker", @"C:\Apps\Broker\terminal64.exe", @"C:\Data", @"C:\Apps\Broker", [], DiscoverySource.Manual, true);
 
     [Fact]
-    public void Native_input_layout_matches_win32_send_input()
-    {
-        Marshal.SizeOf<WindowsTerminalAlgoTradingController.NativeInput>().Should().Be(40);
-        Marshal.SizeOf<WindowsTerminalAlgoTradingController.NativeKeyboardInput>().Should().Be(24);
-        Marshal.OffsetOf<WindowsTerminalAlgoTradingController.NativeInput>("Keyboard").Should().Be(8);
-        Marshal.OffsetOf<WindowsTerminalAlgoTradingController.NativeKeyboardInput>("VirtualKey").Should().Be(0);
-    }
-
-    [Theory]
-    [InlineData(10u, 20u, 30u, new uint[] { 20, 30 })]
-    [InlineData(10u, 20u, 20u, new uint[] { 20 })]
-    [InlineData(10u, 10u, 30u, new uint[] { 30 })]
-    [InlineData(10u, 10u, 10u, new uint[] { })]
-    public void Input_acquisition_attaches_to_target_and_foreground_threads(uint current, uint target, uint foreground, uint[] expected)
-    {
-        WindowsTerminalAlgoTradingController.RequiredInputAttachments(current, target, foreground).Should().Equal(expected);
-    }
-
-    [Fact]
-    public void Native_input_retries_until_target_is_confirmed_foreground()
-    {
-        var native = new FakeNativeApi([10, 10, 10, 42, 42], [false]);
-        var delays = new List<TimeSpan>();
-        var input = new WindowsTerminalAlgoTradingController.Win32AlgoTradingInput(native, delays.Add);
-
-        var failure = input.TryAcquire(42, out var lease);
-
-        failure.Should().Be(AlgoTradingInputFailure.None);
-        lease.Should().NotBeNull();
-        native.ForegroundRequests.Should().Equal([42]);
-        native.SetResultsUsed.Should().Equal([false], "a rejected activation request may still be followed by delayed focus acquisition");
-        delays.Should().HaveCount(1);
-        native.InputForegrounds.Should().Equal([42], "the target must be rechecked immediately before input injection");
-        lease!.Dispose();
-    }
-
-    [Fact]
-    public void Failed_foreground_acquisition_cleans_up_and_does_not_poison_the_next_request()
-    {
-        var native = new FakeNativeApi([10, 10, 10, 10, 10, 10, 10, 10, 42, 42, 42]);
-        var input = new WindowsTerminalAlgoTradingController.Win32AlgoTradingInput(native, _ => { });
-
-        input.TryAcquire(42, out var failedLease).Should().Be(AlgoTradingInputFailure.ForegroundActivation);
-        failedLease.Should().BeNull();
-        native.Attachments.Should().ContainInOrder((1u, 2u, true), (1u, 3u, true), (1u, 3u, false), (1u, 2u, false));
-        native.ForegroundRequests.Should().EndWith(10, "the original foreground must be restored on failure");
-
-        input.TryAcquire(42, out var succeedingLease).Should().Be(AlgoTradingInputFailure.None);
-        native.InputForegrounds.Should().Equal([42]);
-        succeedingLease!.Dispose();
-    }
-
-    [Fact]
     public async Task Set_is_no_op_when_desired_state_is_already_current()
     {
-        var input = new FakeInput();
+        var commands = new FakeCommands();
         var inspector = new FakeInspector(Snapshot(AlgoTradingState.Enabled));
 
-        var result = await new WindowsTerminalAlgoTradingController(inspector, RunningProcess(42), _ => [4242], input, FakeClock()).SetAsync(terminal, true);
+        var result = await Controller(inspector, commands).SetAsync(terminal, true);
 
         result.Success.Should().BeTrue();
         result.Message.Should().Be("Algo Trading is already enabled.");
-        input.Sent.Should().BeEmpty();
-        input.Minimized.Should().BeEmpty("an unchanged terminal state must not be minimized");
+        commands.Sent.Should().BeEmpty("an unchanged terminal state must not toggle the command");
     }
 
     [Fact]
     public async Task Set_refuses_when_no_unique_terminal_window_exists()
     {
-        var input = new FakeInput();
+        var commands = new FakeCommands();
         var inspector = new FakeInspector(Snapshot(AlgoTradingState.Disabled));
 
-        var result = await new WindowsTerminalAlgoTradingController(inspector, RunningProcess(42), _ => [], input, FakeClock()).SetAsync(terminal, true);
+        var result = await Controller(inspector, commands, _ => []).SetAsync(terminal, true);
 
         result.Success.Should().BeFalse();
         result.Message.Should().Be("No matching MetaTrader 5 window was found.");
-        input.Sent.Should().BeEmpty();
+        commands.Sent.Should().BeEmpty();
     }
 
     [Fact]
-    public async Task Set_sends_ctrl_e_to_the_matched_window_and_confirms_new_state()
+    public async Task Set_posts_the_algo_trading_command_and_confirms_the_new_state()
     {
-        var input = new FakeInput();
+        var commands = new FakeCommands();
         var inspector = new FakeInspector(Snapshot(AlgoTradingState.Disabled), Snapshot(AlgoTradingState.Enabled));
 
-        var result = await new WindowsTerminalAlgoTradingController(inspector, RunningProcess(42), _ => [4242], input, FakeClock()).SetAsync(terminal, true);
+        var result = await Controller(inspector, commands).SetAsync(terminal, true);
 
         result.Success.Should().BeTrue();
+        result.Message.Should().Be("Algo Trading was enabled.");
         result.Snapshot!.GlobalAlgoTrading.Should().Be(AlgoTradingState.Enabled);
-        input.Sent.Should().Equal([(4242, true)]);
+        commands.Sent.Should().Equal([(4242, WindowsTerminalAlgoTradingController.AlgoTradingCommandId)]);
     }
 
-
     [Fact]
-    public async Task Set_holds_input_lease_until_desired_state_is_observed()
+    public async Task Set_posts_the_command_exactly_once_because_the_command_toggles()
     {
-        var input = new FakeInput();
+        var commands = new FakeCommands();
         var inspector = new FakeInspector(
-            () => Snapshot(AlgoTradingState.Disabled),
-            () =>
-            {
-                input.LeaseDisposed.Should().BeFalse("the terminal must retain focus while confirmation is polled");
-                return Snapshot(AlgoTradingState.Enabled);
-            });
+            Snapshot(AlgoTradingState.Disabled),
+            Snapshot(AlgoTradingState.Disabled),
+            Snapshot(AlgoTradingState.Disabled),
+            Snapshot(AlgoTradingState.Enabled));
 
-        var result = await new WindowsTerminalAlgoTradingController(inspector, RunningProcess(42), _ => [4242], input, FakeClock()).SetAsync(terminal, true);
+        var result = await Controller(inspector, commands, pollInterval: TimeSpan.FromMilliseconds(1)).SetAsync(terminal, true);
 
         result.Success.Should().BeTrue();
-        input.LeaseDisposed.Should().BeTrue("focus must be restored after confirmation completes");
-        input.Minimized.Should().Equal([4242]);
-        input.LeaseDisposalOrder.Should().Equal(["Minimized", "Disposed"],
-            "the terminal must be minimized before focus is returned");
+        commands.Sent.Should().HaveCount(1, "a second post would toggle the state straight back");
     }
+
     [Fact]
-    public async Task Set_fails_when_observed_state_does_not_change()
+    public async Task Set_fails_without_retrying_when_the_command_cannot_be_posted()
     {
-        var input = new FakeInput();
+        var commands = new FakeCommands { PostResult = false };
+        var inspector = new FakeInspector(Snapshot(AlgoTradingState.Disabled), Snapshot(AlgoTradingState.Enabled));
+
+        var result = await Controller(inspector, commands).SetAsync(terminal, true);
+
+        result.Success.Should().BeFalse();
+        result.Message.Should().Be("The Algo Trading command could not be posted to the MetaTrader 5 window.");
+        result.Snapshot!.GlobalAlgoTrading.Should().Be(AlgoTradingState.Disabled);
+        inspector.Reads.Should().Be(1, "an undelivered command must not start confirmation polling");
+    }
+
+    [Fact]
+    public async Task Set_fails_when_the_observed_state_does_not_change()
+    {
+        var commands = new FakeCommands();
         var inspector = new FakeInspector(Snapshot(AlgoTradingState.Disabled), Snapshot(AlgoTradingState.Disabled), Snapshot(AlgoTradingState.Disabled));
 
-        var result = await new WindowsTerminalAlgoTradingController(inspector, RunningProcess(42), _ => [4242], input, FakeClock(), pollInterval: TimeSpan.Zero, timeout: TimeSpan.Zero).SetAsync(terminal, true);
+        var result = await Controller(inspector, commands, pollInterval: TimeSpan.Zero, timeout: TimeSpan.Zero).SetAsync(terminal, true);
 
         result.Success.Should().BeFalse();
         result.Message.Should().Be("Algo Trading did not become enabled.");
-        input.Sent.Should().Equal([(4242, true)]);
-        input.Minimized.Should().BeEmpty("an unconfirmed state change must not minimize the terminal");
+        commands.Sent.Should().HaveCount(1);
     }
 
     [Fact]
-    public async Task Set_reports_the_specific_input_acquisition_failure()
+    public async Task Set_fails_when_the_terminal_is_not_running()
     {
-        var input = new FakeInput { Failure = AlgoTradingInputFailure.ForegroundActivation };
+        var commands = new FakeCommands();
         var inspector = new FakeInspector(Snapshot(AlgoTradingState.Disabled));
 
-        var result = await new WindowsTerminalAlgoTradingController(inspector, RunningProcess(42), _ => [4242], input, FakeClock()).SetAsync(terminal, true);
+        var result = await Controller(inspector, commands, state: new TerminalRuntimeState(TerminalState.Stopped, null, null)).SetAsync(terminal, true);
 
         result.Success.Should().BeFalse();
-        result.Message.Should().Be("The MetaTrader 5 window could not be brought to the foreground.");
-        input.Sent.Should().BeEmpty("Ctrl+E must not be injected unless the target window owns the foreground");
+        result.Message.Should().Be("The terminal must be running before Algo Trading can be changed.");
+        commands.Sent.Should().BeEmpty();
     }
 
     [Fact]
     public async Task Set_refuses_when_runtime_snapshot_is_unavailable_or_unknown()
     {
-        var input = new FakeInput();
-        var inspector = new FakeInspector(Snapshot(AlgoTradingState.Unknown));
+        var commands = new FakeCommands();
 
-        var result = await new WindowsTerminalAlgoTradingController(inspector, RunningProcess(42), _ => [4242], input, FakeClock()).SetAsync(terminal, true);
+        var unknown = await Controller(new FakeInspector(Snapshot(AlgoTradingState.Unknown)), commands).SetAsync(terminal, true);
+        unknown.Success.Should().BeFalse();
+        unknown.Message.Should().Be("The current Algo Trading state is unknown.");
 
-        result.Success.Should().BeFalse();
-        result.Message.Should().Be("The current Algo Trading state is unknown.");
-        input.Sent.Should().BeEmpty();
+        var missing = await Controller(new FakeInspector((TerminalAccountSnapshot?)null), commands).SetAsync(terminal, true);
+        missing.Success.Should().BeFalse();
+        missing.Message.Should().Be("The MT5 Manager bridge snapshot is unavailable.");
+
+        commands.Sent.Should().BeEmpty();
     }
 
-    private static FakeProcess RunningProcess(int pid) => new(new TerminalRuntimeState(TerminalState.Running, pid, null));
-    private static Func<DateTimeOffset> FakeClock() => () => DateTimeOffset.UnixEpoch;
+    [Fact]
+    public async Task Set_disables_the_terminal_when_disable_is_requested()
+    {
+        var commands = new FakeCommands();
+        var inspector = new FakeInspector(Snapshot(AlgoTradingState.Enabled), Snapshot(AlgoTradingState.Disabled));
+
+        var result = await Controller(inspector, commands).SetAsync(terminal, false);
+
+        result.Success.Should().BeTrue();
+        result.Message.Should().Be("Algo Trading was disabled.");
+        commands.Sent.Should().Equal([(4242, WindowsTerminalAlgoTradingController.AlgoTradingCommandId)]);
+    }
+
+    private static WindowsTerminalAlgoTradingController Controller(
+        FakeInspector inspector,
+        FakeCommands commands,
+        Func<int, IReadOnlyList<nint>>? windowFinder = null,
+        TerminalRuntimeState? state = null,
+        TimeSpan? pollInterval = null,
+        TimeSpan? timeout = null) =>
+        new(
+            inspector,
+            new FakeProcess(state ?? new TerminalRuntimeState(TerminalState.Running, 42, null)),
+            windowFinder ?? (_ => [4242]),
+            commands,
+            () => DateTimeOffset.UnixEpoch,
+            pollInterval,
+            timeout);
+
     private static TerminalAccountSnapshot Snapshot(AlgoTradingState state) => new(1, DateTimeOffset.UtcNow, @"C:\Data", 123, "Trader", "Server", "Company", AccountTradeMode.Real, true, state, true, true, true);
 
     private sealed class FakeInspector(params Func<TerminalAccountSnapshot?>[] snapshots) : ITerminalRuntimeInspector
     {
         private int call;
-        public FakeInspector(params TerminalAccountSnapshot?[] snapshots) : this(snapshots.Select<TerminalAccountSnapshot?, Func<TerminalAccountSnapshot?>>(snapshot => () => snapshot).ToArray()) { }
+
+        public FakeInspector(params TerminalAccountSnapshot?[] snapshots)
+            : this(snapshots.Select<TerminalAccountSnapshot?, Func<TerminalAccountSnapshot?>>(snapshot => () => snapshot).ToArray()) { }
+
+        public int Reads => call;
+
         public Task<TerminalAccountSnapshot?> ReadAsync(TerminalRegistration terminal, CancellationToken cancellationToken = default) =>
             Task.FromResult(call < snapshots.Length ? snapshots[call++]() : null);
     }
 
-    private sealed class FakeInput : IAlgoTradingInput
+    private sealed class FakeCommands : IAlgoTradingCommandSender
     {
-        public List<(nint Window, bool Sent)> Sent { get; } = [];
-        public List<nint> Minimized { get; } = [];
-        public List<string> LeaseDisposalOrder { get; } = [];
-        public bool LeaseDisposed { get; private set; }
-        public AlgoTradingInputFailure Failure { get; init; }
-        public AlgoTradingInputFailure TryAcquire(nint window, out IAlgoTradingLease? lease)
+        public List<(nint Window, int Command)> Sent { get; } = [];
+        public bool PostResult { get; init; } = true;
+
+        public bool Send(nint window, int command)
         {
-            lease = null;
-            if (Failure != AlgoTradingInputFailure.None) return Failure;
-            Sent.Add((window, true));
-            lease = new CallbackLease(
-                () => { Minimized.Add(window); LeaseDisposalOrder.Add("Minimized"); },
-                () => { LeaseDisposed = true; LeaseDisposalOrder.Add("Disposed"); });
-            return AlgoTradingInputFailure.None;
-        }
-    }
-
-    private sealed class CallbackLease(Action onMinimize, Action onDispose) : IAlgoTradingLease
-    {
-        public bool TryMinimize()
-        {
-            onMinimize();
-            return true;
-        }
-
-        public void Dispose() => onDispose();
-    }
-
-    private sealed class FakeNativeApi(IEnumerable<nint> foregroundValues, IEnumerable<bool>? setResults = null) : IAlgoTradingNativeApi
-    {
-        private readonly Queue<nint> foregrounds = new(foregroundValues);
-        private readonly Queue<bool> setResults = new(setResults ?? []);
-        private nint foreground = foregroundValues.FirstOrDefault();
-
-        public List<nint> ForegroundRequests { get; } = [];
-        public List<(uint Current, uint Other, bool Attach)> Attachments { get; } = [];
-        public List<nint> InputForegrounds { get; } = [];
-        public List<bool> SetResultsUsed { get; } = [];
-
-        public nint GetForegroundWindow()
-        {
-            if (foregrounds.Count > 0) foreground = foregrounds.Dequeue();
-            return foreground;
-        }
-
-        public uint GetWindowThreadProcessId(nint window) => window == 42 ? 2u : 3u;
-        public uint GetCurrentThreadId() => 1;
-        public bool PostMessage(nint window, int message, nint wParam, nint lParam) => true;
-
-        public bool AttachThreadInput(uint threadId, uint attachThreadId, bool attach)
-        {
-            Attachments.Add((threadId, attachThreadId, attach));
-            return true;
-        }
-
-        public bool SetForegroundWindow(nint window)
-        {
-            ForegroundRequests.Add(window);
-            var result = setResults.Count == 0 || setResults.Dequeue();
-            SetResultsUsed.Add(result);
-            return result;
-        }
-
-        public bool SendInput(WindowsTerminalAlgoTradingController.NativeInput[] inputs)
-        {
-            InputForegrounds.Add(foreground);
-            return true;
+            if (PostResult) Sent.Add((window, command));
+            return PostResult;
         }
     }
 

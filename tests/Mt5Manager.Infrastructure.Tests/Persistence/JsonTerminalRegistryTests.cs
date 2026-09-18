@@ -94,6 +94,32 @@ public sealed class JsonTerminalRegistryTests : IDisposable
         loaded.Should().BeEmpty();
     }
 
+    [Fact]
+    public async Task Concurrent_registry_instances_leave_a_complete_document()
+    {
+        var registries = Enumerable.Range(0, 20).Select(_ => new JsonTerminalRegistry(RegistryPath)).ToArray();
+        var registrations = Enumerable.Range(0, 20).Select(index => Registration($"Terminal {index}", @"C:\MT5\terminal64.exe", @"C:\Data")).ToArray();
+
+        await Task.WhenAll(registries.Zip(registrations).Select(pair => pair.First.SaveAsync([pair.Second])));
+
+        registrations.Should().ContainEquivalentOf((await registries[0].LoadAsync()).Single());
+        Directory.EnumerateFiles(_root, ".terminals.json.*.tmp").Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Corrupt_load_preserves_snapshot_without_moving_a_new_current_file()
+    {
+        await File.WriteAllTextAsync(RegistryPath, "{broken");
+        var registry = new JsonTerminalRegistry(RegistryPath);
+
+        await registry.LoadAsync();
+        await registry.SaveAsync([Registration("New", @"C:\MT5\terminal64.exe", @"C:\Data")]);
+
+        File.Exists(RegistryPath).Should().BeTrue();
+        (await registry.LoadAsync()).Should().ContainSingle(x => x.DisplayName == "New");
+        (await File.ReadAllTextAsync(Directory.EnumerateFiles(_root, "terminals.json.corrupt-*").Single())).Should().Be("{broken");
+    }
+
     private static TerminalRegistration Registration(string name, string executable, string data) =>
         new(Guid.NewGuid(), name, executable, data, Path.GetDirectoryName(executable)!, [], DiscoverySource.Manual, true);
 
