@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Mt5Manager.Application.Abstractions;
@@ -76,4 +77,59 @@ public sealed partial class ManualRegistrationViewModel(Func<string,bool>? fileE
     public bool IsValid=>!string.IsNullOrWhiteSpace(DisplayName)&&fileExists(ExecutablePath)&&directoryExists(DataDirectory);
     public string ValidationMessage=>IsValid?"Ready to register.":"Enter a name, an existing terminal executable, and an existing data directory.";
     public TerminalRegistration CreateRegistration(){if(!IsValid)throw new InvalidOperationException(ValidationMessage);var exe=Path.GetFullPath(ExecutablePath);var data=Path.GetFullPath(DataDirectory);return new(Guid.NewGuid(),DisplayName.Trim(),exe,data,Path.GetDirectoryName(exe)!,[],DiscoverySource.Manual,true);}
+}
+
+public sealed partial class Mt5PackageInstallViewModel : ObservableObject
+{
+    readonly IMt5PackageInstaller installer;
+    readonly IReadOnlyList<TerminalRegistration> terminals;
+    readonly TerminalRegistration? selectedTerminal;
+
+    public Mt5PackageInstallViewModel(IMt5PackageInstaller installer, IReadOnlyList<TerminalRegistration> terminals, TerminalRegistration? selectedTerminal)
+    {
+        this.installer = installer;
+        this.terminals = terminals;
+        this.selectedTerminal = selectedTerminal;
+        IsSelectedScope = selectedTerminal is not null;
+        IsAllScope = selectedTerminal is null;
+    }
+
+    [ObservableProperty][NotifyPropertyChangedFor(nameof(CanInstall))] string sourcePath = "";
+    [ObservableProperty][NotifyPropertyChangedFor(nameof(CanInstall))] bool isSelectedScope;
+    [ObservableProperty][NotifyPropertyChangedFor(nameof(CanInstall))] bool isAllScope;
+    [ObservableProperty] bool isExpertAdvisor = true;
+    [ObservableProperty][NotifyPropertyChangedFor(nameof(CanInstall))] bool isBusy;
+    [ObservableProperty] string? error;
+    [ObservableProperty] string? summary;
+    public ObservableCollection<Mt5PackageInstallOutcome> Outcomes { get; } = [];
+    public bool IsIndicator { get=>!IsExpertAdvisor; set=>IsExpertAdvisor=!value; }
+    public bool HasSelectedTerminal => selectedTerminal is not null;
+    public string SelectedScopeLabel => selectedTerminal is null ? "Selected terminal unavailable" : $"Selected terminal: {selectedTerminal.DisplayName}";
+    public bool CanInstall => !IsBusy && !string.IsNullOrWhiteSpace(SourcePath) && ((IsSelectedScope && selectedTerminal is not null) || (IsAllScope && terminals.Count > 0));
+
+    partial void OnIsSelectedScopeChanged(bool value) { if(value) IsAllScope=false; OnPropertyChanged(nameof(CanInstall)); }
+    partial void OnIsAllScopeChanged(bool value) { if(value) IsSelectedScope=false; OnPropertyChanged(nameof(CanInstall)); }
+
+    partial void OnIsExpertAdvisorChanged(bool value)=>OnPropertyChanged(nameof(IsIndicator));
+    public IReadOnlyList<TerminalRegistration> ResolveTargets() => IsSelectedScope
+        ? selectedTerminal is null ? [] : [selectedTerminal]
+        : IsAllScope ? terminals : [];
+
+    public async Task InstallAsync(CancellationToken cancellationToken=default)
+    {
+        var targets=ResolveTargets();
+        if(targets.Count==0){Error=IsSelectedScope?"The selected terminal is no longer available.":"No terminals are currently listed.";return;}
+        if(!CanInstall)return;
+        IsBusy=true;Error=null;Summary=null;Outcomes.Clear();
+        try
+        {
+            var result=await installer.InstallAsync(SourcePath,IsExpertAdvisor?Mt5PackageKind.ExpertAdvisor:Mt5PackageKind.Indicator,targets,cancellationToken);
+            foreach(var outcome in result.Outcomes)Outcomes.Add(outcome);
+            var succeeded=result.Outcomes.Count(x=>x.Success);
+            Summary=$"{succeeded} of {result.Outcomes.Count} terminal installations succeeded.";
+        }
+        catch(OperationCanceledException)when(cancellationToken.IsCancellationRequested){throw;}
+        catch(Exception ex){Error=ex.Message;}
+        finally{IsBusy=false;}
+    }
 }

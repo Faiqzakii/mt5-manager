@@ -2,7 +2,7 @@ using Mt5Manager.Domain.Models;
 
 namespace Mt5Manager.Application.Abstractions;
 
-public enum AlgoOperationSource { Wpf, Telegram }
+public enum AlgoOperationSource { Wpf, Telegram, Scheduler }
 
 public sealed record AlgoTradingRequest(Guid TerminalId, bool Enable, AlgoOperationSource Source);
 

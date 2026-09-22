@@ -1,9 +1,11 @@
 using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Mt5Manager.Application.Telegram;
+using Mt5Manager.Application.Services;
 using Mt5Manager.Infrastructure.Persistence;
 using Mt5Manager.Application.Abstractions;
 using Mt5Manager.Infrastructure.Bridge;
+using Mt5Manager.Infrastructure.Deployment;
 using Mt5Manager.Infrastructure.Security;
 using Mt5Manager.Infrastructure.Telegram;
 using Mt5Manager.Wpf.ViewModels;
@@ -46,6 +48,33 @@ public sealed class AppCompositionTests
         using var provider = services.BuildServiceProvider();
         provider.GetRequiredService<MainViewModel>().Should().NotBeNull();
     }
+
+    [Fact]
+    public void ConfigureServices_RegistersThePackageInstaller()
+    {
+        var services=new ServiceCollection();
+        App.ConfigureServices(services,new HttpClient());
+        services.Should().ContainSingle(x=>x.ServiceType==typeof(IMt5PackageInstaller)&&x.ImplementationType==typeof(Mt5PackageInstaller)&&x.Lifetime==ServiceLifetime.Singleton);
+    }
+    [Fact]
+    public void ConfigureServices_RegistersRecurringAlgoScheduler()
+    {
+        var services = new ServiceCollection();
+
+        App.ConfigureServices(services, new HttpClient());
+
+        services.Should().ContainSingle(x => x.ServiceType == typeof(IAlgoScheduleStore) &&
+            x.ImplementationType == typeof(JsonAlgoScheduleStore) && x.Lifetime == ServiceLifetime.Singleton);
+        services.Should().ContainSingle(x => x.ServiceType == typeof(IAlgoScheduleFailureNotifier) &&
+            x.ImplementationType == typeof(TelegramAlgoScheduleFailureNotifier) && x.Lifetime == ServiceLifetime.Singleton);
+        services.Should().ContainSingle(x => x.ServiceType == typeof(IAlgoScheduler) &&
+            x.ImplementationFactory != null && x.Lifetime == ServiceLifetime.Singleton);
+        services.Should().ContainSingle(x => x.ServiceType == typeof(AlgoScheduleViewModel) &&
+            x.Lifetime == ServiceLifetime.Transient);
+        services.Should().ContainSingle(x => x.ServiceType == typeof(AlgoScheduleDialog) &&
+            x.Lifetime == ServiceLifetime.Transient);
+    }
+
 
     [Fact]
     public async Task ApplicationLifetime_CancelsOperationsBeforeStoppingBot()

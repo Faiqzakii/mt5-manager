@@ -7,9 +7,9 @@ using Mt5Manager.Wpf.Views;
 namespace Mt5Manager.Wpf;
 public partial class MainWindow:Window
 {
- readonly MainViewModel viewModel; readonly ITerminalStorageInspector inspector; readonly TerminalOperationCoordinator coordinator; readonly Func<TelegramSettingsDialog>? createTelegramDialog; readonly TelegramApplicationLifetime? applicationLifetime;
+ readonly MainViewModel viewModel; readonly ITerminalStorageInspector inspector; readonly TerminalOperationCoordinator coordinator; readonly Func<TelegramSettingsDialog>? createTelegramDialog; readonly Func<IReadOnlyList<Mt5Manager.Domain.Models.TerminalRegistration>,Mt5Manager.Domain.Models.TerminalRegistration?,Mt5PackageInstallDialog>? createPackageDialog; readonly Func<AlgoScheduleDialog>? createScheduleDialog; readonly TelegramApplicationLifetime? applicationLifetime;
  readonly DispatcherTimer backgroundRefresh=new(){Interval=TimeSpan.FromSeconds(15)}; readonly CancellationTokenSource lifetime=new();
- public MainWindow(MainViewModel viewModel,ITerminalStorageInspector inspector,TerminalOperationCoordinator coordinator,Func<TelegramSettingsDialog>? createTelegramDialog=null,TelegramApplicationLifetime? applicationLifetime=null){InitializeComponent();this.viewModel=viewModel;this.inspector=inspector;this.coordinator=coordinator;this.createTelegramDialog=createTelegramDialog;this.applicationLifetime=applicationLifetime;DataContext=viewModel;backgroundRefresh.Tick+=(_,_)=>_=viewModel.RefreshStatesAsync(lifetime.Token);}
+ public MainWindow(MainViewModel viewModel,ITerminalStorageInspector inspector,TerminalOperationCoordinator coordinator,Func<TelegramSettingsDialog>? createTelegramDialog=null,TelegramApplicationLifetime? applicationLifetime=null,Func<IReadOnlyList<Mt5Manager.Domain.Models.TerminalRegistration>,Mt5Manager.Domain.Models.TerminalRegistration?,Mt5PackageInstallDialog>? createPackageDialog=null,Func<AlgoScheduleDialog>? createScheduleDialog=null){InitializeComponent();this.viewModel=viewModel;this.inspector=inspector;this.coordinator=coordinator;this.createTelegramDialog=createTelegramDialog;this.applicationLifetime=applicationLifetime;this.createPackageDialog=createPackageDialog;this.createScheduleDialog=createScheduleDialog;DataContext=viewModel;backgroundRefresh.Tick+=(_,_)=>_=viewModel.RefreshStatesAsync(lifetime.Token);}
  async void Window_Loaded(object sender,RoutedEventArgs e){try{await viewModel.RefreshAsync();backgroundRefresh.Start();}catch(Exception exception){viewModel.Error=exception.Message;backgroundRefresh.Start();}}
  void Window_Closed(object? sender,EventArgs e){backgroundRefresh.Stop();lifetime.Cancel();applicationLifetime?.CancelOperations();viewModel.CancelRefresh();}
  async void Manual_Click(object sender,RoutedEventArgs e){var dialog=new ManualRegistrationDialog{Owner=this};if(dialog.ShowDialog()==true&&dialog.Registration is not null)await viewModel.AddManualAsync(dialog.Registration);}
@@ -17,6 +17,16 @@ public partial class MainWindow:Window
  {
   if(createTelegramDialog is null){MessageBox.Show(this,"Telegram services are not available.","Telegram Bot",MessageBoxButton.OK,MessageBoxImage.Information);return;}
   var dialog=createTelegramDialog();dialog.Owner=this;dialog.ShowDialog();
+ }
+ void Scheduler_Click(object sender,RoutedEventArgs e)
+ {
+  if(createScheduleDialog is null){MessageBox.Show(this,"Algo scheduler is not available.","Algo Scheduler",MessageBoxButton.OK,MessageBoxImage.Information);return;}
+  var dialog=createScheduleDialog();dialog.Owner=this;dialog.ShowDialog();
+ }
+ void PackageInstall_Click(object sender,RoutedEventArgs e)
+ {
+  if(createPackageDialog is null){MessageBox.Show(this,"Package installation is not available.","Install EA / Indicator",MessageBoxButton.OK,MessageBoxImage.Information);return;}
+  var dialog=createPackageDialog(viewModel.AllRegistrations,viewModel.SelectedTerminal?.Terminal);dialog.Owner=this;dialog.ShowDialog();
  }
  void Cleanup_Click(object sender,RoutedEventArgs e){if((sender as FrameworkElement)?.DataContext is TerminalRowViewModel row)new CleanupDialog(new CleanupViewModel(row.Terminal,inspector,coordinator,row.ApplyCleanupResultAsync,row.RunStorageInspectionAsync)){Owner=this}.ShowDialog();}
 }

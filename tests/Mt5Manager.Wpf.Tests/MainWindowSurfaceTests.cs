@@ -8,6 +8,7 @@ using Mt5Manager.Application.Abstractions;
 using Mt5Manager.Application.Services;
 using Mt5Manager.Domain.Models;
 using Mt5Manager.Wpf.ViewModels;
+using Mt5Manager.Wpf.Views;
 
 namespace Mt5Manager.Wpf.Tests;
 
@@ -104,6 +105,44 @@ public sealed class MainWindowSurfaceTests
         controls.enableIndex.Should().Be(1);
         controls.disableIndex.Should().Be(2);
     }
+    [Fact]
+    public async Task Scheduler_dialog_discloses_runtime_retry_and_Telegram_behavior()
+    {
+        var rendered = await RunStaAsync(async () =>
+        {
+            EnsureApplication();
+            var terminal = new TerminalRegistration(
+                Guid.NewGuid(), "Alpha", @"C:\terminal64.exe", @"C:\Data", @"C:\", [], DiscoverySource.Manual, true);
+            var viewModel = new AlgoScheduleViewModel(new ScheduleService(terminal));
+            await viewModel.LoadAsync();
+            var window = new AlgoScheduleDialog(viewModel)
+            {
+                WindowStyle = WindowStyle.None,
+                ShowInTaskbar = false,
+                Left = -10000,
+                Top = -10000
+            };
+            window.Show();
+            window.UpdateLayout();
+            try
+            {
+                var disclosure = FindTextBlock(window, text =>
+                    text.Text.Contains("must remain running", StringComparison.Ordinal) &&
+                    text.Text.Contains("retried once after 5 minutes", StringComparison.Ordinal) &&
+                    text.Text.Contains("Telegram", StringComparison.Ordinal));
+                var save = FindDescendants<Button>(window).SingleOrDefault(button => Equals(button.Content, "Save schedule"));
+                return (Disclosure: disclosure?.Text, SaveButtonFound: save is not null);
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        rendered.Disclosure.Should().NotBeNull();
+        rendered.SaveButtonFound.Should().BeTrue();
+    }
+
 
     static App EnsureApplication()
     {
@@ -215,4 +254,19 @@ public sealed class MainWindowSurfaceTests
         public Task<BridgeInstallationResult> InstallAsync(TerminalRegistration terminal, CancellationToken cancellationToken = default) =>
             Task.FromResult(new BridgeInstallationResult(true, "Bridge recompiled.", null));
     }
+    sealed class ScheduleService(TerminalRegistration terminal) : IAlgoScheduler
+    {
+        public bool IsRunning => true;
+        public DateTimeOffset? LastEvaluationAt => null;
+        public string? LastError => null;
+        public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<AlgoSchedulerSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(new AlgoSchedulerSnapshot([], [], [terminal], true, null, null, "UTC"));
+        public Task<AlgoSchedule> SaveAsync(AlgoSchedule schedule, CancellationToken cancellationToken = default) =>
+            Task.FromResult(schedule);
+        public Task RemoveAsync(Guid scheduleId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
 }

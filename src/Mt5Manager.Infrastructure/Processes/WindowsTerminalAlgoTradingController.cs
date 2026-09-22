@@ -22,11 +22,13 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
     internal const int AlgoTradingCommandId = 32851;
 
     private const int WmCommand = 0x0111;
+    private const uint GwOwner = 4;
 
     private readonly ITerminalRuntimeInspector inspector;
     private readonly ITerminalProcessController process;
     private readonly Func<int, IReadOnlyList<nint>> windowFinder;
     private readonly IAlgoTradingCommandSender commands;
+    private readonly Func<nint, nint> ownerFinder;
     private readonly Func<DateTimeOffset> clock;
     private readonly TimeSpan pollInterval;
     private readonly TimeSpan timeout;
@@ -39,12 +41,14 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
         IAlgoTradingCommandSender? commands = null,
         Func<DateTimeOffset>? clock = null,
         TimeSpan? pollInterval = null,
-        TimeSpan? timeout = null)
+        TimeSpan? timeout = null,
+        Func<nint, nint>? ownerFinder = null)
     {
         this.inspector = inspector;
         this.process = process;
         this.windowFinder = windowFinder ?? EnumerateTopLevelWindows;
         this.commands = commands ?? new Win32AlgoTradingCommandSender();
+        this.ownerFinder = ownerFinder ?? GetWindowOwner;
         this.clock = clock ?? (() => DateTimeOffset.UtcNow);
         this.pollInterval = pollInterval ?? TimeSpan.FromMilliseconds(250);
         this.timeout = timeout ?? TimeSpan.FromSeconds(10);
@@ -66,12 +70,20 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
             if (state.State != TerminalState.Running || state.ProcessId is null)
                 return new(false, "The terminal must be running before Algo Trading can be changed.", current);
 
-            var windows = windowFinder(state.ProcessId.Value);
-            if (windows.Count != 1) return new(false, windows.Count == 0 ? "No matching MetaTrader 5 window was found." : "Several matching MetaTrader 5 windows were found.", current);
+            var commandTarget = nint.Zero;
+            var matchingFrameCount = 0;
+            foreach (var window in windowFinder(state.ProcessId.Value))
+            {
+                if (ownerFinder(window) != nint.Zero) continue;
+                commandTarget = window;
+                if (++matchingFrameCount > 1) break;
+            }
 
-            if (!commands.Send(windows[0], AlgoTradingCommandId))
+            if (matchingFrameCount != 1)
+                return new(false, matchingFrameCount == 0 ? "No matching MetaTrader 5 window was found." : "Several matching MetaTrader 5 windows were found.", current);
+
+            if (!commands.Send(commandTarget, AlgoTradingCommandId))
                 return new(false, "The Algo Trading command could not be posted to the MetaTrader 5 window.", current);
-
             var deadline = clock().Add(timeout);
             while (true)
             {
@@ -98,6 +110,7 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
         }, nint.Zero);
         return windows;
     }
+    private static nint GetWindowOwner(nint window) => GetWindow(window, GwOwner);
 
     private sealed class Win32AlgoTradingCommandSender : IAlgoTradingCommandSender
     {
@@ -118,6 +131,8 @@ public sealed class WindowsTerminalAlgoTradingController : ITerminalAlgoTradingC
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool IsWindowVisible(nint window);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern nint GetWindow(nint window, uint command);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool PostMessage(nint window, int message, nint wParam, nint lParam);
 }

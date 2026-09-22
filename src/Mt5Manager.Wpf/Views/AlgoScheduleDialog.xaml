@@ -1,0 +1,86 @@
+<Window x:Class="Mt5Manager.Wpf.Views.AlgoScheduleDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Algo scheduler" Height="760" Width="1040" MinHeight="640" MinWidth="900"
+        WindowStartupLocation="CenterOwner" Loaded="Window_Loaded" Closed="Window_Closed">
+    <Grid Margin="24">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <Grid Margin="0,0,0,16">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Text="Algo scheduler" Style="{StaticResource ObjectTitleStyle}"/>
+                <TextBlock Text="Apply recurring ON/OFF states to one or more registered terminals." Foreground="{StaticResource TextSecondaryBrush}" Margin="0,5,0,0"/>
+                <TextBlock Text="{Binding Status}" Style="{StaticResource CaptionStyle}" Margin="0,5,0,0" AutomationProperties.LiveSetting="Polite"/>
+            </StackPanel>
+            <Button Grid.Column="1" Content="Refresh" Click="Refresh_Click" VerticalAlignment="Bottom" IsEnabled="{Binding CanInteract}"/>
+        </Grid>
+
+        <TabControl Grid.Row="1">
+            <TabItem Header="Schedules">
+                <Grid Margin="14">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="330"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <Border Style="{StaticResource SubtlePanelStyle}" Padding="0">
+                        <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                            <Grid Margin="14,12,14,10"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="Recurring rules" Style="{StaticResource SectionTitleStyle}"/>
+                                <Button Grid.Column="1" Content="New" Click="New_Click" Style="{StaticResource QuietButtonStyle}" MinHeight="32" Padding="10,4" IsEnabled="{Binding CanInteract}"/>
+                            </Grid>
+                            <ListBox Grid.Row="1" ItemsSource="{Binding Schedules}" SelectedItem="{Binding SelectedSchedule,Mode=TwoWay}" BorderThickness="0" Background="Transparent" Padding="8" AutomationProperties.Name="Algo schedules">
+                                <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,0,0,5"/></Style></ListBox.ItemContainerStyle>
+                                <ListBox.ItemTemplate><DataTemplate><Border Padding="10"><StackPanel><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><Border Grid.Column="1" Style="{StaticResource StatusPillStyle}" Padding="7,2"><TextBlock Text="{Binding Action}" FontSize="12" FontWeight="SemiBold"/></Border></Grid><TextBlock Text="{Binding Time}" FontSize="18" FontWeight="SemiBold" Margin="0,5,0,0"/><TextBlock Text="{Binding Days}" Style="{StaticResource CaptionStyle}"/><TextBlock Text="{Binding Terminals}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Terminals}" Margin="0,3,0,0"/><TextBlock Text="{Binding State}" FontSize="12" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,3,0,0"/></StackPanel></Border></DataTemplate></ListBox.ItemTemplate>
+                            </ListBox>
+                        </Grid>
+                    </Border>
+
+                    <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel Margin="0,0,6,0">
+                            <TextBlock Text="Rule details" Style="{StaticResource SectionTitleStyle}"/>
+                            <TextBlock Text="Name" Style="{StaticResource LabelStyle}" Margin="0,14,0,6"/>
+                            <TextBox Text="{Binding Name,UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="Schedule name"/>
+
+                            <Grid Margin="0,16,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <StackPanel><TextBlock Text="Local time" Style="{StaticResource LabelStyle}"/><TextBox Text="{Binding TimeText,UpdateSourceTrigger=PropertyChanged}" Width="120" HorizontalAlignment="Left" Margin="0,6,0,0" AutomationProperties.Name="Schedule time HH:mm"/></StackPanel>
+                                <StackPanel Grid.Column="1" Margin="16,0,0,0"><TextBlock Text="Action" Style="{StaticResource LabelStyle}"/><StackPanel Orientation="Horizontal" Margin="0,3,0,0"><RadioButton Content="Turn Algo ON" IsChecked="{Binding Enable}" GroupName="ScheduleAction" MinHeight="40" VerticalContentAlignment="Center"/><RadioButton Content="Turn Algo OFF" IsChecked="{Binding Disable}" GroupName="ScheduleAction" Margin="22,0,0,0" MinHeight="40" VerticalContentAlignment="Center"/></StackPanel></StackPanel>
+                            </Grid>
+                            <TextBlock Text="{Binding TimeZoneDisplayName,StringFormat=Times follow the VPS Windows timezone: {0}}" Style="{StaticResource CaptionStyle}" Margin="0,5,0,0"/>
+
+                            <TextBlock Text="Active days" Style="{StaticResource LabelStyle}" Margin="0,16,0,6"/>
+                            <ItemsControl ItemsSource="{Binding Days}"><ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel><ItemsControl.ItemTemplate><DataTemplate><CheckBox Content="{Binding Label}" IsChecked="{Binding IsSelected}" Style="{StaticResource CheckRowStyle}" Width="88" Margin="0,0,7,7"/></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
+
+                            <Grid Margin="0,12,0,6"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="Target terminals" Style="{StaticResource LabelStyle}" VerticalAlignment="Center"/><Button Grid.Column="1" Content="Select all" Click="SelectAll_Click" Style="{StaticResource QuietButtonStyle}" MinHeight="30" Padding="8,3" IsEnabled="{Binding CanInteract}"/><Button Grid.Column="2" Content="Clear" Click="ClearTerminals_Click" Style="{StaticResource QuietButtonStyle}" MinHeight="30" Padding="8,3" IsEnabled="{Binding CanInteract}"/></Grid>
+                            <ItemsControl ItemsSource="{Binding Terminals}"><ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel><ItemsControl.ItemTemplate><DataTemplate><CheckBox Content="{Binding Name}" ToolTip="{Binding Name}" IsChecked="{Binding IsSelected}" Style="{StaticResource CheckRowStyle}" Width="270" Margin="0,0,7,7"/></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
+
+                            <CheckBox Content="Schedule enabled" IsChecked="{Binding IsEnabled}" FontWeight="SemiBold" Margin="0,8,0,0"/>
+                            <Border Style="{StaticResource WarningPanelStyle}" Margin="0,12,0,0"><TextBlock Text="MT5 Manager must remain running. A failed action is retried once after 5 minutes. If the retry also fails, the result is sent to the configured Telegram chat." TextWrapping="Wrap" Foreground="{StaticResource WarningBrush}"/></Border>
+                            <Border Margin="0,12,0,0"><Border.Style><Style TargetType="Border" BasedOn="{StaticResource ErrorPanelStyle}"><Style.Triggers><DataTrigger Binding="{Binding Error}" Value="{x:Null}"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Border.Style><TextBlock Text="{Binding Error}" Foreground="{StaticResource DangerBrush}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Assertive"/></Border>
+                            <ProgressBar IsIndeterminate="True" Visibility="{Binding IsBusy,Converter={StaticResource BooleanToVisibilityConverter}}" Height="4" Margin="0,12,0,0"/>
+                            <Grid Margin="0,14,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><Button Content="Delete" Click="Delete_Click" Style="{StaticResource DangerOutlineButtonStyle}" IsEnabled="{Binding CanDelete}"/><Button Grid.Column="2" Content="Save schedule" Click="Save_Click" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="{Binding CanSave}" MinWidth="130"/></Grid>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="Execution history">
+                <Grid Margin="14"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <TextBlock Text="Newest 100 scheduler attempts. Attempt 2 is the only automatic retry." Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,10"/>
+                    <DataGrid Grid.Row="1" ItemsSource="{Binding History}" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False" HeadersVisibility="Column" GridLinesVisibility="Horizontal" BorderBrush="{StaticResource BorderBrush}" AutomationProperties.Name="Scheduler execution history">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Attempted" Binding="{Binding AttemptedAt,StringFormat={}{0:yyyy-MM-dd HH:mm:ss}}" Width="150"/>
+                            <DataGridTextColumn Header="Schedule" Binding="{Binding Schedule}" Width="140"/>
+                            <DataGridTextColumn Header="Terminal" Binding="{Binding Terminal}" Width="140"/>
+                            <DataGridTextColumn Header="Action" Binding="{Binding Action}" Width="65"/>
+                            <DataGridTextColumn Header="Try" Binding="{Binding Attempt}" Width="45"/>
+                            <DataGridTextColumn Header="Outcome" Binding="{Binding Outcome}" Width="85"/>
+                            <DataGridTextColumn Header="Message" Binding="{Binding Message}" Width="*"/>
+                            <DataGridTextColumn Header="Telegram" Binding="{Binding Notification}" Width="120"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </TabItem>
+        </TabControl>
+
+        <Border Grid.Row="2" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0" Padding="0,14,0,0" Margin="0,14,0,0">
+            <Button Content="Close" IsCancel="True" HorizontalAlignment="Right" MinWidth="88"/>
+        </Border>
+    </Grid>
+</Window>

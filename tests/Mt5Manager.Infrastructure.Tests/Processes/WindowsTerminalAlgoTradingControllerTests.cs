@@ -34,6 +34,38 @@ public sealed class WindowsTerminalAlgoTradingControllerTests
         result.Message.Should().Be("No matching MetaTrader 5 window was found.");
         commands.Sent.Should().BeEmpty();
     }
+    [Fact]
+    public async Task Set_ignores_owned_popup_and_posts_to_the_terminal_frame()
+    {
+        var commands = new FakeCommands();
+        var inspector = new FakeInspector(Snapshot(AlgoTradingState.Enabled), Snapshot(AlgoTradingState.Disabled));
+
+        var result = await Controller(
+            inspector,
+            commands,
+            _ => [4242, 4343],
+            ownerFinder: window => window == 4343 ? 4242 : nint.Zero).SetAsync(terminal, false);
+
+        result.Success.Should().BeTrue();
+        commands.Sent.Should().Equal([(4242, WindowsTerminalAlgoTradingController.AlgoTradingCommandId)]);
+    }
+
+    [Fact]
+    public async Task Set_refuses_when_multiple_ownerless_terminal_frames_exist()
+    {
+        var commands = new FakeCommands();
+        var inspector = new FakeInspector(Snapshot(AlgoTradingState.Enabled));
+
+        var result = await Controller(
+            inspector,
+            commands,
+            _ => [4242, 4343],
+            ownerFinder: _ => nint.Zero).SetAsync(terminal, false);
+
+        result.Success.Should().BeFalse();
+        result.Message.Should().Be("Several matching MetaTrader 5 windows were found.");
+        commands.Sent.Should().BeEmpty();
+    }
 
     [Fact]
     public async Task Set_posts_the_algo_trading_command_and_confirms_the_new_state()
@@ -140,7 +172,8 @@ public sealed class WindowsTerminalAlgoTradingControllerTests
         Func<int, IReadOnlyList<nint>>? windowFinder = null,
         TerminalRuntimeState? state = null,
         TimeSpan? pollInterval = null,
-        TimeSpan? timeout = null) =>
+        TimeSpan? timeout = null,
+        Func<nint, nint>? ownerFinder = null) =>
         new(
             inspector,
             new FakeProcess(state ?? new TerminalRuntimeState(TerminalState.Running, 42, null)),
@@ -148,7 +181,8 @@ public sealed class WindowsTerminalAlgoTradingControllerTests
             commands,
             () => DateTimeOffset.UnixEpoch,
             pollInterval,
-            timeout);
+            timeout,
+            ownerFinder);
 
     private static TerminalAccountSnapshot Snapshot(AlgoTradingState state) => new(1, DateTimeOffset.UtcNow, @"C:\Data", 123, "Trader", "Server", "Company", AccountTradeMode.Real, true, state, true, true, true);
 

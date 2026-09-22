@@ -22,6 +22,7 @@ public partial class App : System.Windows.Application
     ServiceProvider? provider;
     HttpClient? httpClient;
     TelegramApplicationLifetime? telegramLifetime;
+    IAlgoScheduler? algoScheduler;
     Mutex? singleInstance;
 
     protected override async void OnStartup(StartupEventArgs e)
@@ -52,6 +53,16 @@ public partial class App : System.Windows.Application
             MessageBox.Show("Telegram could not be started. Review the saved Telegram settings.\n\n" +
                 exception.Message, "Telegram Bot", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
+        algoScheduler = provider.GetRequiredService<IAlgoScheduler>();
+        try
+        {
+            await algoScheduler.StartAsync();
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show("Algo scheduler could not be started. Scheduled actions are paused.\n\n" +
+                exception.Message, "Algo Scheduler", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
         provider.GetRequiredService<MainWindow>().Show();
     }
 
@@ -69,7 +80,9 @@ public partial class App : System.Windows.Application
         services.AddSingleton<ITerminalRuntimeInspector, Mt5Manager.Infrastructure.Runtime.Mt5RuntimeSnapshotReader>();
         services.AddSingleton<ITerminalAlgoTradingController, WindowsTerminalAlgoTradingController>();
         services.AddSingleton<IBridgeInstaller, Mt5BridgeInstaller>();
+        services.AddSingleton<IMt5PackageInstaller, Mt5Manager.Infrastructure.Deployment.Mt5PackageInstaller>();
         services.AddSingleton<IAlgoTradingService, AlgoTradingService>();
+        services.AddSingleton<IAlgoScheduleStore, JsonAlgoScheduleStore>();
         services.AddSingleton<ITerminalDiscoverySource, ProcessDiscoverySource>();
         services.AddSingleton<ITerminalDiscoverySource, ShortcutDiscoverySource>();
         services.AddSingleton<ITerminalDiscoverySource, StandardLocationDiscoverySource>();
@@ -92,8 +105,17 @@ public partial class App : System.Windows.Application
                 sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<IDelay>()), ShutdownTimeout));
         services.AddSingleton(sp => new TelegramApplicationLifetime(
             sp.GetRequiredService<ITelegramBotService>(), ShutdownTimeout));
+        services.AddSingleton<IAlgoScheduleFailureNotifier, TelegramAlgoScheduleFailureNotifier>();
+        services.AddSingleton<IAlgoScheduler>(sp => new AlgoScheduler(
+            sp.GetRequiredService<IAlgoScheduleStore>(),
+            sp.GetRequiredService<ITerminalRegistry>(),
+            sp.GetRequiredService<IAlgoTradingService>(),
+            sp.GetRequiredService<IAlgoScheduleFailureNotifier>(),
+            sp.GetRequiredService<TimeProvider>()));
         services.AddTransient<TelegramSettingsViewModel>();
         services.AddTransient<TelegramSettingsDialog>();
+        services.AddTransient<AlgoScheduleViewModel>();
+        services.AddTransient<AlgoScheduleDialog>();
 
         services.AddSingleton<MainViewModel>(sp => new MainViewModel(
             sp.GetRequiredService<ITerminalDiscovery>(), sp.GetRequiredService<ITerminalRegistry>(),
@@ -104,11 +126,20 @@ public partial class App : System.Windows.Application
             sp.GetRequiredService<MainViewModel>(), sp.GetRequiredService<ITerminalStorageInspector>(),
             sp.GetRequiredService<TerminalOperationCoordinator>(),
             () => sp.GetRequiredService<TelegramSettingsDialog>(),
-            sp.GetRequiredService<TelegramApplicationLifetime>()));
+            sp.GetRequiredService<TelegramApplicationLifetime>(),
+            (terminals, selected) => new Mt5PackageInstallDialog(new Mt5PackageInstallViewModel(
+                sp.GetRequiredService<IMt5PackageInstaller>(), terminals, selected)),
+            () => sp.GetRequiredService<AlgoScheduleDialog>()));
     }
 
     protected override void OnExit(ExitEventArgs e)
     {
+        if (algoScheduler is not null)
+        {
+            using var timeout = new CancellationTokenSource(ShutdownTimeout);
+            try { algoScheduler.StopAsync(timeout.Token).GetAwaiter().GetResult(); }
+            catch (OperationCanceledException) { }
+        }
         if (telegramLifetime is not null)
         {
             try { telegramLifetime.StopAsync().GetAwaiter().GetResult(); }

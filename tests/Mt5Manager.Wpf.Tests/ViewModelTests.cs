@@ -221,6 +221,24 @@ public sealed class ViewModelTests
         row.BridgeInstallSummary.Should().Be("Bridge installed and compiled");
     }
 
+    [Fact] public async Task Bridge_install_visibility_tracks_status_transitions()
+    {
+        var bridge=new Bridge{Status=new(BridgeInstallationState.NotInstalled,"s","c",true)};
+        var row=new TerminalRowViewModel(T(),new Process(),bridge:bridge);
+        await row.RefreshStateAsync();row.IsBridgeInstallVisible.Should().BeTrue();
+        bridge.Status=new(BridgeInstallationState.Installed,"s","c",true);
+        await row.RefreshStateAsync();row.IsBridgeInstallVisible.Should().BeFalse();
+        bridge.Status=null;
+        await row.RefreshStateAsync();row.IsBridgeInstallVisible.Should().BeTrue();
+    }
+
+    [Fact] public async Task Main_exposes_all_registrations_when_search_filters_visible_rows()
+    {
+        var vm=new MainViewModel(new Discovery([T("Alpha"),T("Beta")]),new Registry(),new Process());
+        await vm.RefreshAsync();vm.SearchText="Alpha";
+        vm.Terminals.Should().ContainSingle();vm.AllRegistrations.Should().HaveCount(2);
+    }
+
     [Fact] public async Task Row_without_a_resolvable_mql5_folder_hides_the_bridge_state()
     {
         var row=new TerminalRowViewModel(T(),new Process(),bridge:new Bridge{Status=null});
