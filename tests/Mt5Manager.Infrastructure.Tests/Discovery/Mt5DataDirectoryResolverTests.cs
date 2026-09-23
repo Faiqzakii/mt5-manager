@@ -93,12 +93,14 @@ public sealed class Mt5DataDirectoryResolverTests : IDisposable
     }
 
     [Fact]
-    public void Resolve_preserves_an_existing_verified_directory()
+    public void Resolve_rechecks_a_previously_verified_directory()
     {
-        var existing = Candidate("A1", installation);
-        var terminal = Terminal([]) with { DataDirectory = existing, DataDirectoryVerified = true };
+        var corrected = Candidate("A1", installation);
+        var wrong = Directory.CreateDirectory(Path.Combine(root, "Old Data")).FullName;
+        CreateStructure(wrong);
+        var terminal = Terminal([]) with { DataDirectory = wrong, DataDirectoryVerified = true };
 
-        new Mt5DataDirectoryResolver(appData).Resolve(terminal).Should().Be(existing);
+        new Mt5DataDirectoryResolver(appData).Resolve(terminal).Should().Be(corrected);
     }
 
     private string Candidate(string name, string origin)

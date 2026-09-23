@@ -77,7 +77,9 @@ public partial class App : System.Windows.Application
         services.AddSingleton<ICleanupTargetResolver, CleanupTargetResolver>();
         services.AddSingleton<ITerminalStorageInspector, TerminalStorageInspector>();
         services.AddSingleton<ITerminalCleanupService, TerminalCleanupService>();
-        services.AddSingleton<ITerminalRuntimeInspector, Mt5Manager.Infrastructure.Runtime.Mt5RuntimeSnapshotReader>();
+        services.AddSingleton<Mt5Manager.Infrastructure.Runtime.Mt5RuntimeSnapshotReader>();
+        services.AddSingleton<ITerminalRuntimeInspector>(sp => sp.GetRequiredService<Mt5Manager.Infrastructure.Runtime.Mt5RuntimeSnapshotReader>());
+        services.AddSingleton<Mt5Manager.Infrastructure.Runtime.IMt5RuntimeIdentityResolver>(sp => sp.GetRequiredService<Mt5Manager.Infrastructure.Runtime.Mt5RuntimeSnapshotReader>());
         services.AddSingleton<ITerminalAlgoTradingController, WindowsTerminalAlgoTradingController>();
         services.AddSingleton<IBridgeInstaller, Mt5BridgeInstaller>();
         services.AddSingleton<IMt5PackageInstaller, Mt5Manager.Infrastructure.Deployment.Mt5PackageInstaller>();

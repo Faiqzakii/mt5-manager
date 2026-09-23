@@ -1,25 +1,27 @@
 using Mt5Manager.Application.Abstractions;
 using Mt5Manager.Domain.Models;
 using Mt5Manager.Infrastructure.Persistence;
+using Mt5Manager.Infrastructure.Runtime;
 
 namespace Mt5Manager.Infrastructure.Discovery;
 
 public sealed class TerminalDiscovery(
     IEnumerable<ITerminalDiscoverySource> sources,
     ITerminalRegistry? registry = null,
-    IMt5DataDirectoryResolver? dataDirectoryResolver = null) : ITerminalDiscovery
+    IMt5DataDirectoryResolver? dataDirectoryResolver = null,
+    IMt5RuntimeIdentityResolver? runtimeIdentityResolver = null) : ITerminalDiscovery
 {
     public async Task<IReadOnlyList<TerminalRegistration>> DiscoverAsync(CancellationToken cancellationToken = default)
     {
         var discovered = new Dictionary<TerminalIdentity, TerminalRegistration>();
         IReadOnlyList<TerminalRegistration> registrations = registry is null
             ? []
-            : (await registry.LoadAsync(cancellationToken)).Select(Enrich).ToArray();
+            : await ResolveAllAsync(await registry.LoadAsync(cancellationToken), cancellationToken);
         foreach (var registration in registrations)
             Merge(discovered, registration);
         foreach (var source in sources)
             foreach (var candidate in await source.DiscoverAsync(cancellationToken))
-                Merge(discovered, MatchRegisteredIdentity(Enrich(candidate), registrations));
+                Merge(discovered, await EnrichAsync(candidate, cancellationToken));
 
         var result = discovered.Values
             .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
@@ -29,37 +31,28 @@ public sealed class TerminalDiscovery(
         return result;
     }
 
-    private TerminalRegistration Enrich(TerminalRegistration candidate)
+    private async Task<IReadOnlyList<TerminalRegistration>> ResolveAllAsync(
+        IReadOnlyList<TerminalRegistration> candidates,
+        CancellationToken cancellationToken)
     {
-        if (candidate.DataDirectoryVerified || dataDirectoryResolver is null) return candidate;
-        var resolved = dataDirectoryResolver.Resolve(candidate);
-        return resolved is null
-            ? candidate
-            : candidate with { DataDirectory = resolved, DataDirectoryVerified = true };
+        var resolved = new TerminalRegistration[candidates.Count];
+        for (var index = 0; index < candidates.Count; index++)
+            resolved[index] = await EnrichAsync(candidates[index], cancellationToken);
+        return resolved;
     }
 
-    private static TerminalRegistration MatchRegisteredIdentity(
+    private async Task<TerminalRegistration> EnrichAsync(
         TerminalRegistration candidate,
-        IReadOnlyList<TerminalRegistration> registrations)
+        CancellationToken cancellationToken)
     {
-        if (candidate.Source != DiscoverySource.Process || !string.IsNullOrWhiteSpace(candidate.DataDirectory))
-            return candidate;
-
-        var executable = Canonicalize(candidate.ExecutablePath);
-        var matches = registrations
-            .Select(Normalize)
-            .Where(registration => registration.DataDirectory.Length > 0 &&
-                StringComparer.OrdinalIgnoreCase.Equals(registration.ExecutablePath, executable))
-            .GroupBy(registration => registration.DataDirectory, StringComparer.OrdinalIgnoreCase)
-            .Take(2)
-            .ToArray();
-        return matches.Length == 1
-            ? candidate with
-            {
-                DataDirectory = matches[0].Key,
-                DataDirectoryVerified = matches[0].First().DataDirectoryVerified
-            }
-            : candidate;
+        string? resolved = null;
+        if (runtimeIdentityResolver is not null)
+            resolved = await runtimeIdentityResolver.ResolveDataDirectoryAsync(candidate.ExecutablePath, cancellationToken);
+        if (resolved is null && dataDirectoryResolver is not null)
+            resolved = dataDirectoryResolver.Resolve(candidate);
+        return resolved is null
+            ? candidate with { DataDirectoryVerified = false }
+            : candidate with { DataDirectory = resolved, DataDirectoryVerified = true };
     }
 
     private static void Merge(
@@ -69,8 +62,10 @@ public sealed class TerminalDiscovery(
         var normalized = Normalize(candidate);
         if (!JsonTerminalRegistry.IsValid(normalized)) return;
         var key = new TerminalIdentity(normalized.ExecutablePath, normalized.DataDirectory);
-        if (!discovered.TryGetValue(key, out var existing) || Priority(normalized.Source) > Priority(existing.Source))
+        if (!discovered.TryGetValue(key, out var existing))
             discovered[key] = normalized;
+        else if (Priority(normalized.Source) > Priority(existing.Source))
+            discovered[key] = normalized with { Id = existing.Id };
     }
 
     private static TerminalRegistration Normalize(TerminalRegistration candidate)

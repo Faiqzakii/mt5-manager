@@ -2,7 +2,7 @@
 #property version "1.00"
 #property strict
 
-#define PROTOCOL_VERSION 1
+#define PROTOCOL_VERSION 2
 #define REFRESH_SECONDS 3
 
 input string InpFileNamePrefix = "Mt5Manager/runtime-";
@@ -49,6 +49,7 @@ void WriteSnapshot()
       "\"protocolVersion\":" + IntegerToString(PROTOCOL_VERSION) + "," +
       "\"timestamp\":\"" + IsoUtc(TimeGMT()) + "\"," +
       "\"dataPath\":" + Quote(TerminalInfoString(TERMINAL_DATA_PATH)) + "," +
+      "\"terminalPath\":" + Quote(TerminalInfoString(TERMINAL_PATH)) + "," +
       "\"login\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "," +
       "\"accountName\":" + Quote(AccountInfoString(ACCOUNT_NAME)) + "," +
       "\"server\":" + Quote(AccountInfoString(ACCOUNT_SERVER)) + "," +

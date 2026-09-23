@@ -20,7 +20,8 @@ public sealed record TerminalAccountSnapshot(
     AlgoTradingState GlobalAlgoTrading,
     bool EaTradingAllowed,
     bool AccountTradingAllowed,
-    bool AccountExpertAllowed);
+    bool AccountExpertAllowed,
+    string TerminalPath = "");
 
 public sealed record AlgoTradingControlResult(bool Success, string Message, TerminalAccountSnapshot? Snapshot);
 

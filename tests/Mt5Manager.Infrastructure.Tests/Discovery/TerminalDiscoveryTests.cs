@@ -7,6 +7,7 @@ using Mt5Manager.Application.Abstractions;
 using Mt5Manager.Domain.Models;
 using Mt5Manager.Infrastructure.Discovery;
 using Mt5Manager.Infrastructure.Persistence;
+using Mt5Manager.Infrastructure.Runtime;
 
 namespace Mt5Manager.Infrastructure.Tests.Discovery;
 
@@ -104,7 +105,7 @@ public sealed class TerminalDiscoveryTests : IDisposable
     }
 
     [Fact]
-    public async Task Discover_deduplicates_process_without_data_directory_against_unambiguous_registration()
+    public async Task Discover_does_not_assign_registered_data_by_executable_alone()
     {
         var registry = new JsonTerminalRegistry(Path.Combine(_root, "terminals.json"));
         var registered = Candidate(DiscoverySource.Manual, @"C:\MT5\terminal64.exe", @"C:\Data", "Manual");
@@ -116,8 +117,9 @@ public sealed class TerminalDiscoveryTests : IDisposable
 
         var result = await new TerminalDiscovery([new StubSource(process)], registry).DiscoverAsync();
 
-        result.Should().ContainSingle().Which.Should().BeEquivalentTo(registered, options => options.Excluding(item => item.Id));
-        result.Should().ContainSingle().Which.Source.Should().Be(DiscoverySource.Manual);
+        result.Should().HaveCount(2);
+        result.Should().Contain(item => item.Id == registered.Id && item.DataDirectory == Path.GetFullPath(registered.DataDirectory));
+        result.Should().Contain(item => item.Source == DiscoverySource.Process && item.DataDirectory.Length == 0 && !item.DataDirectoryVerified);
     }
 
     [Fact]
@@ -140,21 +142,41 @@ public sealed class TerminalDiscoveryTests : IDisposable
     }
 
     [Fact]
-    public async Task Discover_enriches_an_unverified_terminal_before_deduplication_and_persistence()
+    public async Task Discover_runtime_correction_wins_and_preserves_registered_id()
     {
         var registry = new JsonTerminalRegistry(Path.Combine(_root, "terminals.json"));
         var executable = Path.Combine(_root, "Broker", "terminal64.exe");
-        var candidate = Candidate(DiscoverySource.StandardLocation, executable, string.Empty, "Broker");
-        var resolvedData = Directory.CreateDirectory(Path.Combine(_root, "ResolvedData")).FullName;
-        var resolver = new RecordingDataDirectoryResolver(resolvedData);
+        var wrongData = Path.Combine(_root, "WrongData");
+        var correctedData = Path.Combine(_root, "CorrectedData");
+        var registered = Candidate(DiscoverySource.Manual, executable, wrongData, "Broker");
+        await registry.SaveAsync([registered]);
+        var process = Candidate(DiscoverySource.Process, executable, string.Empty, "Running") with { DataDirectoryVerified = false };
+        var runtime = new RecordingRuntimeIdentityResolver(correctedData);
+        var staticResolver = new RecordingDataDirectoryResolver(wrongData);
 
-        var result = await new TerminalDiscovery([new StubSource(candidate, candidate)], registry, resolver).DiscoverAsync();
+        var result = await new TerminalDiscovery([new StubSource(process)], registry, staticResolver, runtime).DiscoverAsync();
 
-        result.Should().ContainSingle();
-        result[0].DataDirectory.Should().Be(resolvedData);
-        result[0].DataDirectoryVerified.Should().BeTrue();
-        resolver.Calls.Should().Be(2);
-        (await registry.LoadAsync()).Should().ContainSingle().Which.DataDirectory.Should().Be(resolvedData);
+        var terminal = result.Should().ContainSingle().Subject;
+        terminal.Id.Should().Be(registered.Id);
+        terminal.DataDirectory.Should().Be(Path.GetFullPath(correctedData));
+        terminal.DataDirectoryVerified.Should().BeTrue();
+        staticResolver.Calls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Discover_unresolved_runtime_and_static_evidence_remains_unverified()
+    {
+        var candidate = Candidate(DiscoverySource.Process, @"C:\MT5\terminal64.exe", string.Empty, "Running") with
+        {
+            DataDirectoryVerified = false
+        };
+
+        var result = await new TerminalDiscovery([new StubSource(candidate)], dataDirectoryResolver: new NullDataDirectoryResolver(),
+            runtimeIdentityResolver: new RecordingRuntimeIdentityResolver(null)).DiscoverAsync();
+
+        var terminal = result.Should().ContainSingle().Subject;
+        terminal.DataDirectory.Should().BeEmpty();
+        terminal.DataDirectoryVerified.Should().BeFalse();
     }
 
     [Fact]
@@ -344,6 +366,18 @@ public sealed class TerminalDiscoveryTests : IDisposable
         while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Mt5Manager.sln")))
             directory = directory.Parent;
         return directory?.FullName ?? throw new DirectoryNotFoundException("Repository root not found.");
+    }
+
+    private sealed class NullDataDirectoryResolver : IMt5DataDirectoryResolver
+    {
+        public string? Resolve(TerminalRegistration terminal) => null;
+    }
+
+    private sealed class RecordingRuntimeIdentityResolver(string? result) : IMt5RuntimeIdentityResolver
+    {
+        public Task<string?> ResolveDataDirectoryAsync(
+            string executablePath,
+            CancellationToken cancellationToken = default) => Task.FromResult(result);
     }
 
     private sealed class BlockingHandleSource(int blockedProcessId) : IProcessHandleSource

@@ -23,6 +23,7 @@ public sealed class Mt5RuntimeSnapshotReaderTests : IDisposable
         var snapshot = await new Mt5RuntimeSnapshotReader(root).ReadAsync(terminal);
 
         snapshot!.Login.Should().Be(12345);
+        snapshot.TerminalPath.Should().Be(terminal.WorkingDirectory);
         snapshot.AccountName.Should().Be("Trader");
         snapshot.Server.Should().Be("Broker-Live");
         snapshot.Company.Should().Be("Broker Ltd");
@@ -163,13 +164,73 @@ public sealed class Mt5RuntimeSnapshotReaderTests : IDisposable
         Mt5RuntimeSnapshotReader.SnapshotPath(root, path)
             .Should().Be(Path.Combine(root, "Mt5Manager", $"runtime-{bridgeHash}.json"));
     }
+    [Fact]
+    public async Task Resolve_returns_the_unique_structured_data_path_for_matching_terminal_directory()
+    {
+        CreateDataStructure(root);
+        WriteSnapshot(Mt5RuntimeSnapshotReader.ProtocolVersion, DateTimeOffset.UtcNow, root, true, AlgoTradingState.Enabled);
 
-    private void WriteSnapshot(int protocolVersion, DateTimeOffset timestamp, string dataPath, bool connected, AlgoTradingState global, string suffix = "") =>
-        WriteRaw(JsonSerializer.Serialize(new
+        (await new Mt5RuntimeSnapshotReader(root).ResolveDataDirectoryAsync(terminal.ExecutablePath))
+            .Should().Be(Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)));
+    }
+
+    [Fact]
+    public async Task Resolve_rejects_mismatched_terminal_path()
+    {
+        CreateDataStructure(root);
+        WriteSnapshot(Mt5RuntimeSnapshotReader.ProtocolVersion, DateTimeOffset.UtcNow, root, true, AlgoTradingState.Enabled, terminalPath: @"C:\Other");
+
+        (await new Mt5RuntimeSnapshotReader(root).ResolveDataDirectoryAsync(terminal.ExecutablePath)).Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData(-10, 2)]
+    [InlineData(0, 1)]
+    public async Task Resolve_rejects_stale_or_old_protocol_snapshot(int ageMinutes, int protocolVersion)
+    {
+        CreateDataStructure(root);
+        WriteSnapshot(protocolVersion, DateTimeOffset.UtcNow.AddMinutes(ageMinutes), root, true, AlgoTradingState.Enabled);
+
+        (await new Mt5RuntimeSnapshotReader(root).ResolveDataDirectoryAsync(terminal.ExecutablePath)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Resolve_rejects_ambiguous_distinct_data_paths()
+    {
+        var otherData = Path.Combine(Path.GetTempPath(), $"mt5-runtime-other-{Guid.NewGuid():N}");
+        try
+        {
+            CreateDataStructure(root);
+            CreateDataStructure(otherData);
+            WriteSnapshot(Mt5RuntimeSnapshotReader.ProtocolVersion, DateTimeOffset.UtcNow, root, true, AlgoTradingState.Enabled);
+            WriteSnapshotAt(otherData, Mt5RuntimeSnapshotReader.ProtocolVersion, DateTimeOffset.UtcNow, otherData);
+
+            (await new Mt5RuntimeSnapshotReader(root).ResolveDataDirectoryAsync(terminal.ExecutablePath)).Should().BeNull();
+        }
+        finally { try { Directory.Delete(otherData, true); } catch { } }
+    }
+
+    private static void CreateDataStructure(string path)
+    {
+        Directory.CreateDirectory(Path.Combine(path, "config"));
+        Directory.CreateDirectory(Path.Combine(path, "bases"));
+        Directory.CreateDirectory(Path.Combine(path, "logs"));
+    }
+
+
+    private void WriteSnapshot(int protocolVersion, DateTimeOffset timestamp, string dataPath, bool connected, AlgoTradingState global, string suffix = "", string? terminalPath = null) =>
+        WriteRaw(SnapshotJson(protocolVersion, timestamp, dataPath, connected, global, terminalPath ?? terminal.WorkingDirectory), suffix);
+
+    private void WriteSnapshotAt(string snapshotDataPath, int protocolVersion, DateTimeOffset timestamp, string dataPath) =>
+        WriteRaw(SnapshotJson(protocolVersion, timestamp, dataPath, true, AlgoTradingState.Enabled, terminal.WorkingDirectory), dataPath: snapshotDataPath);
+
+    private static string SnapshotJson(int protocolVersion, DateTimeOffset timestamp, string dataPath, bool connected, AlgoTradingState global, string? terminalPath) =>
+        JsonSerializer.Serialize(new
         {
             protocolVersion,
             timestamp,
             dataPath,
+            terminalPath,
             login = 12345,
             accountName = "Trader",
             server = "Broker-Live",
@@ -180,11 +241,11 @@ public sealed class Mt5RuntimeSnapshotReaderTests : IDisposable
             eaTradingAllowed = true,
             accountTradingAllowed = true,
             accountExpertAllowed = true
-        }), suffix);
+        });
 
-    private void WriteRaw(string content, string suffix = "")
+    private void WriteRaw(string content, string suffix = "", string? dataPath = null)
     {
-        var recordPath = Mt5RuntimeSnapshotReader.SnapshotPath(root, terminal.DataDirectory) + suffix;
+        var recordPath = Mt5RuntimeSnapshotReader.SnapshotPath(root, dataPath ?? terminal.DataDirectory) + suffix;
         Directory.CreateDirectory(Path.GetDirectoryName(recordPath)!);
         File.WriteAllText(recordPath, content);
     }
