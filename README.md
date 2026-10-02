@@ -86,7 +86,16 @@ Perintah yang tersedia: `/start`, `/menu`, `/status` (dashboard), `/on_all` / `/
 
 ## Keselamatan Operasi
 
-- **Stop/Restart/Cleanup/Force gagal tertutup (fail-closed)** bila identitas proses tidak dapat diverifikasi persis atau direktori data terminal kosong/tidak terbaca — mencegah menghentikan atau membersihkan proses terminal yang salah.
+The main window separates fleet navigation from selected-terminal details. Its menu bar contains **Terminal**, **Tools**, **Settings**, and **Help**:
+
+- **Terminal → Scan terminals** refreshes discovery; **Register terminal** opens manual registration.
+- **Tools → Scheduler** and **Install EA / Indicator** open the existing scheduler and bulk installation dialogs.
+- **Settings → Telegram** opens Telegram configuration.
+- **Help → Getting started** selects the guidance tab.
+
+The workspace has three tabs: **Terminals** (the initial fleet/detail view), **Batch results** (per-target session outcomes), and **Getting started** (orientation and setup guidance). Switching tabs does not clear terminal selection or change batch targets. Status, bridge readiness, account summary and Global Algo Trading remain separate concerns. Search supports account/server and paths; state filters narrow the fleet. Row checkboxes select bulk targets independently of details. Session batches run sequentially with succeeded, failed and skipped outcomes; stop/restart still require confirmation.
+
+Clicking a terminal name selects its detail view only; batch targets are changed only through row checkboxes. **Batch operations** stays beside the state filter without shifting the workspace when targets are checked. Its dropdown contains **Start selected**, **Stop selected…**, **Restart selected…**, and **Clear selection**. It is enabled only when at least one target is checked and no scan or batch is active. Search and filters preserve checked targets, including hidden terminals reported in the status bar; stop/restart confirmations use a fixed target snapshot.
 - Terminal yang didaftarkan manual tanpa verifikasi direktori data tidak dapat di-stop, restart, atau dibersihkan.
 - Setiap operasi destruktif meminta konfirmasi (WPF maupun Telegram).
 - Instalasi `.ex5` hanya menulis ke `MQL5\Experts` atau `MQL5\Indicators` pada data directory yang sudah terverifikasi; hasil gagal pada satu terminal tidak disembunyikan oleh keberhasilan terminal lain.
@@ -110,3 +119,11 @@ Output publish ada di `artifacts/publish/Mt5Manager.Wpf-win-x64/` dan `artifacts
 - Kontrol Algo Trading meniru Ctrl+E global terminal; tidak ada kontrol per-chart/per-EA.
 - Status akun bergantung pada bridge EA terpasang di terminal.
 - Scheduler berjalan di dalam proses aplikasi; menutup MT5 Manager menghentikan eksekusi jadwal sampai aplikasi dibuka kembali.
+
+## Fleet workflow for beginners
+
+Choose terminal64.exe when registering. Find the correct existing data folder in MT5 using File → Open Data Folder. Broker login, bridge reporting and Algo Trading are separate concerns. Search supports account/server and paths; state filters help narrow the fleet. Row checkboxes select bulk targets independently of details. Session batches run sequentially with per-target succeeded, failed and skipped outcomes; stop/restart require confirmation.
+
+## Sequential native update
+
+Batch operations offers **Update selected one by one**. Only verified running registrations are eligible. The service gracefully stops (90-second timeout, never force), verifies Stopped, starts with saved arguments, settles 90 seconds, verifies Running, and reads executable version plus bounded fresh journal evidence. A 30-second gap separates targets; fresh activity or version changes permit at most three passes. Unknown evidence is reported honestly; silence never proves latest/no pending. Cancellation after shutdown attempts recovery first. Results and per-pass evidence are audited; no PowerShell, binary download, or force kill is performed.

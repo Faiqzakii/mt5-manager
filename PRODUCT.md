@@ -31,3 +31,11 @@ Bukan terminal trading gelap, bukan dashboard SaaS dengan kartu statistik, bukan
 ## Accessibility & Inclusion
 
 Target WCAG AA. Seluruh kontrol harus dapat digunakan dengan keyboard, fokus harus terlihat, teks dan komponen harus memiliki kontras terukur, status tidak boleh bergantung pada warna, dan motion harus singkat serta menghormati pengaturan reduced motion Windows.
+
+## Novice workflow
+
+The first run keeps guidance visible in a collapsible “Getting started” section. Register a recognizable terminal name, browse to the MT5 executable, then choose the existing data folder opened by MT5 through **File → Open Data Folder**. Select a terminal to see detailed next steps; the list itself stays concise with state and account summary. Filters distinguish an empty installation from a filter that matches nothing. Bulk actions show every selected terminal (including selections hidden by filters) and explain that stopping or restarting can interrupt EAs.
+
+## Native sequential update
+
+Update selected registrations one by one with explicit named-target EA downtime confirmation. Freeze the checked set; skip stopped/unverified targets; preserve arguments; never start after an ambiguous stop. Use bounded fresh version/journal evidence, report Unknown when unavailable, and repeat only on activity/version change up to three passes.

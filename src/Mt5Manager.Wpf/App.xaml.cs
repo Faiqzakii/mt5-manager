@@ -74,6 +74,8 @@ public partial class App : System.Windows.Application
         services.AddSingleton<ITerminalRegistry, JsonTerminalRegistry>();
         services.AddSingleton<ITerminalProcessController, WindowsTerminalProcessController>();
         services.AddSingleton<IAuditLogger, JsonLinesAuditLogger>();
+        services.AddSingleton<ITerminalUpdateEvidenceReader, Mt5Manager.Infrastructure.Runtime.TerminalUpdateEvidenceReader>();
+        services.AddSingleton<ITerminalUpdateService, TerminalUpdateService>();
         services.AddSingleton<ICleanupTargetResolver, CleanupTargetResolver>();
         services.AddSingleton<ITerminalStorageInspector, TerminalStorageInspector>();
         services.AddSingleton<ITerminalCleanupService, TerminalCleanupService>();
