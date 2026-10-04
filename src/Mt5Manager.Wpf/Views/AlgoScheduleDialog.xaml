@@ -39,10 +39,10 @@
                             <TextBox Text="{Binding Name,UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="Schedule name"/>
 
                             <Grid Margin="0,16,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                <StackPanel><TextBlock Text="Local time" Style="{StaticResource LabelStyle}"/><TextBox Text="{Binding TimeText,UpdateSourceTrigger=PropertyChanged}" Width="120" HorizontalAlignment="Left" Margin="0,6,0,0" AutomationProperties.Name="Schedule time HH:mm"/></StackPanel>
+                                <StackPanel><TextBlock Text="Time (WIB)" Style="{StaticResource LabelStyle}"/><TextBox Text="{Binding TimeText,UpdateSourceTrigger=PropertyChanged}" Width="120" HorizontalAlignment="Left" Margin="0,6,0,0" AutomationProperties.Name="Schedule time HH:mm WIB"/></StackPanel>
                                 <StackPanel Grid.Column="1" Margin="16,0,0,0"><TextBlock Text="Action" Style="{StaticResource LabelStyle}"/><StackPanel Orientation="Horizontal" Margin="0,3,0,0"><RadioButton Content="Turn Algo ON" IsChecked="{Binding Enable}" GroupName="ScheduleAction" MinHeight="40" VerticalContentAlignment="Center"/><RadioButton Content="Turn Algo OFF" IsChecked="{Binding Disable}" GroupName="ScheduleAction" Margin="22,0,0,0" MinHeight="40" VerticalContentAlignment="Center"/></StackPanel></StackPanel>
                             </Grid>
-                            <TextBlock Text="{Binding TimeZoneDisplayName,StringFormat=Times follow the VPS Windows timezone: {0}}" Style="{StaticResource CaptionStyle}" Margin="0,5,0,0"/>
+                            <TextBlock Text="{Binding TimeZoneDisplayName,StringFormat=Times always use Western Indonesia Time: {0}}" Style="{StaticResource CaptionStyle}" Margin="0,5,0,0"/>
 
                             <TextBlock Text="Active days" Style="{StaticResource LabelStyle}" Margin="0,16,0,6"/>
                             <ItemsControl ItemsSource="{Binding Days}"><ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel><ItemsControl.ItemTemplate><DataTemplate><CheckBox Content="{Binding Label}" IsChecked="{Binding IsSelected}" Style="{StaticResource CheckRowStyle}" Width="88" Margin="0,0,7,7"/></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
@@ -65,7 +65,7 @@
                     <TextBlock Text="Newest 100 scheduler attempts. Attempt 2 is the only automatic retry." Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,10"/>
                     <DataGrid Grid.Row="1" ItemsSource="{Binding History}" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False" HeadersVisibility="Column" GridLinesVisibility="Horizontal" BorderBrush="{StaticResource BorderBrush}" AutomationProperties.Name="Scheduler execution history">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Attempted" Binding="{Binding AttemptedAt,StringFormat={}{0:yyyy-MM-dd HH:mm:ss}}" Width="150"/>
+                            <DataGridTextColumn Header="Attempted (WIB)" Binding="{Binding AttemptedAt,StringFormat={}{0:yyyy-MM-dd HH:mm:ss}}" Width="150"/>
                             <DataGridTextColumn Header="Schedule" Binding="{Binding Schedule}" Width="140"/>
                             <DataGridTextColumn Header="Terminal" Binding="{Binding Terminal}" Width="140"/>
                             <DataGridTextColumn Header="Action" Binding="{Binding Action}" Width="65"/>

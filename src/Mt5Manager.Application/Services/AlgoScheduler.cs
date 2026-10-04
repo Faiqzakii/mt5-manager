@@ -9,6 +9,10 @@ public sealed class AlgoScheduler : IAlgoScheduler
     internal static readonly TimeSpan DefaultPollInterval = TimeSpan.FromSeconds(30);
     private const int HistoryLimit = 500;
 
+    // Indonesia observes no DST; a fixed zone avoids Windows/IANA id lookups.
+    public static TimeZoneInfo Wib { get; } = TimeZoneInfo.CreateCustomTimeZone(
+        "WIB", TimeSpan.FromHours(7), "WIB (UTC+07:00)", "WIB");
+
     private readonly IAlgoScheduleStore store;
     private readonly ITerminalRegistry registry;
     private readonly IAlgoTradingService algo;
@@ -43,7 +47,7 @@ public sealed class AlgoScheduler : IAlgoScheduler
         this.algo = algo ?? throw new ArgumentNullException(nameof(algo));
         this.notifier = notifier ?? throw new ArgumentNullException(nameof(notifier));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
-        this.timeZone = timeZone ?? TimeZoneInfo.Local;
+        this.timeZone = timeZone ?? Wib;
         this.retryDelay = retryDelay ?? DefaultRetryDelay;
         this.pollInterval = pollInterval ?? DefaultPollInterval;
         this.delay = delay ?? ((duration, cancellationToken) => Task.Delay(duration, cancellationToken));

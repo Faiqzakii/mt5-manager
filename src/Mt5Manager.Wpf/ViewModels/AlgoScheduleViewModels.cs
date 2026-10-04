@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Globalization;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Mt5Manager.Application.Abstractions;
+using Mt5Manager.Application.Services;
 using Mt5Manager.Domain.Models;
 
 namespace Mt5Manager.Wpf.ViewModels;
@@ -54,7 +55,7 @@ public sealed class AlgoScheduleListItemViewModel(
 
 public sealed class AlgoScheduleExecutionViewModel(AlgoScheduleExecution execution)
 {
-    public DateTimeOffset AttemptedAt => execution.AttemptedAt.ToLocalTime();
+    public DateTimeOffset AttemptedAt => TimeZoneInfo.ConvertTime(execution.AttemptedAt, AlgoScheduler.Wib);
     public string Schedule => execution.ScheduleName;
     public string Terminal => execution.TerminalName;
     public string Action => execution.Enable ? "ON" : "OFF";
@@ -165,7 +166,7 @@ public sealed partial class AlgoScheduleViewModel : ObservableObject
             LoadEditor(SelectedSchedule?.Schedule);
             var evaluated = snapshot.LastEvaluationAt is null
                 ? "No evaluation recorded yet"
-                : $"Last checked {snapshot.LastEvaluationAt.Value.ToLocalTime():yyyy-MM-dd HH:mm:ss}";
+                : $"Last checked {TimeZoneInfo.ConvertTime(snapshot.LastEvaluationAt.Value, AlgoScheduler.Wib):yyyy-MM-dd HH:mm:ss} WIB";
             Status = snapshot.LastError is null
                 ? $"Scheduler {(snapshot.IsRunning ? "running" : "stopped")} · {evaluated}"
                 : $"Scheduler error: {snapshot.LastError}";

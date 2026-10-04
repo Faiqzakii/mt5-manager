@@ -143,6 +143,40 @@ public sealed class AlgoSchedulerTests
         occurrence!.LocalDate.Should().Be(new DateOnly(2026, 9, 16));
     }
 
+    [Fact]
+    public async Task Default_scheduler_interprets_rule_times_as_wib_regardless_of_server_timezone()
+    {
+        var terminal = Terminal("Broker");
+        var store = new Store(new([Schedule("WIB open", 8, true, [terminal.Id])], []));
+        var algo = new Algo();
+        var scheduler = new AlgoScheduler(
+            store, new Registry([terminal]), algo, new Notifier(),
+            new Clock(new(2026, 9, 23, 1, 0, 0, TimeSpan.Zero)));
+
+        await scheduler.RunDueAsync();
+
+        store.State.Executions.Should().ContainSingle()
+            .Which.ScheduledAt.Should().BeExactly(new DateTimeOffset(2026, 9, 23, 8, 0, 0, TimeSpan.FromHours(7)));
+        (await scheduler.GetSnapshotAsync()).TimeZoneDisplayName.Should().Contain("WIB");
+    }
+
+    [Fact]
+    public void Wib_day_boundary_selects_the_wib_calendar_day()
+    {
+        var terminal = Terminal("Broker");
+        var schedule = Schedule("Midnight", 0, true, [terminal.Id], minute: 15) with
+        {
+            Days = AlgoScheduleDays.Thursday
+        };
+        var wednesdayUtcThursdayWib = new DateTimeOffset(2026, 9, 23, 17, 30, 0, TimeSpan.Zero);
+
+        var occurrence = AlgoScheduler.LatestOccurrence([schedule], terminal.Id, wednesdayUtcThursdayWib, AlgoScheduler.Wib);
+
+        occurrence.Should().NotBeNull();
+        occurrence!.LocalDate.Should().Be(new DateOnly(2026, 9, 24));
+        occurrence.ScheduledAt.UtcDateTime.Should().Be(new DateTime(2026, 9, 23, 17, 15, 0, DateTimeKind.Utc));
+    }
+
 
     [Fact]
     public void Conflicting_enabled_rules_for_the_same_terminal_day_and_time_are_rejected()

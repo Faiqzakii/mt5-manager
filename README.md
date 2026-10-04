@@ -65,7 +65,7 @@ File dengan nama yang sama pada folder target akan diganti. Setiap terminal mena
 4. Aktifkan **Schedule enabled**, lalu klik **Save schedule**.
 5. Tambahkan aturan lain untuk setiap perubahan state yang dibutuhkan, misalnya Asia ON, London OFF, US OFF, dan tengah malam ON.
 
-Waktu mengikuti timezone Windows pada VPS yang ditampilkan di dialog. Aturan baru atau hasil edit mulai pada occurrence berikutnya sehingga penyusunan jadwal tidak mengubah terminal secara mendadak. Setelah aturan pernah berlaku, MT5 Manager merekonsiliasi occurrence terbaru saat aplikasi dibuka kembali dan tidak menjalankan ulang occurrence yang sudah berhasil.
+Semua waktu jadwal selalu memakai Waktu Indonesia Barat (WIB, UTC+07:00), terlepas dari timezone Windows pada VPS. Riwayat eksekusi dan status "Last checked" juga ditampilkan dalam WIB. Aturan baru atau hasil edit mulai pada occurrence berikutnya sehingga penyusunan jadwal tidak mengubah terminal secara mendadak. Setelah aturan pernah berlaku, MT5 Manager merekonsiliasi occurrence terbaru saat aplikasi dibuka kembali dan tidak menjalankan ulang occurrence yang sudah berhasil.
 
 Scheduler hanya berjalan selama proses MT5 Manager aktif. Jika eksekusi gagal karena terminal, window MT5, atau bridge belum tersedia, scheduler mencoba sekali lagi setelah 5 menit. Kegagalan kedua dicatat di tab **Execution history** dan dikirim ke chat Telegram yang sudah dikonfigurasi; bila Telegram tidak aktif, status notifikasi tetap tercatat secara lokal.
 

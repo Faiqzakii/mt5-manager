@@ -34,6 +34,24 @@ public sealed class AlgoScheduleViewModelTests
     }
 
     [Fact]
+    public async Task Load_shows_history_and_last_check_in_wib_instead_of_machine_time()
+    {
+        var terminal = Terminal("Broker");
+        var schedule = Schedule(terminal.Id);
+        var scheduler = new Scheduler
+        {
+            Snapshot = new([schedule], [Execution(schedule, terminal)], [terminal], true,
+                new DateTimeOffset(2026, 9, 23, 12, 0, 0, TimeSpan.Zero), null, "WIB")
+        };
+        var viewModel = new AlgoScheduleViewModel(scheduler);
+
+        await viewModel.LoadAsync();
+
+        viewModel.History.Single().AttemptedAt.Should().BeExactly(new DateTimeOffset(2026, 9, 23, 15, 35, 0, TimeSpan.FromHours(7)));
+        viewModel.Status.Should().Contain("Last checked 2026-09-23 19:00:00 WIB");
+    }
+
+    [Fact]
     public async Task New_schedule_defaults_to_weekdays_and_requires_a_terminal()
     {
         var terminal = Terminal("Broker");
